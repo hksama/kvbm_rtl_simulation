@@ -3,6 +3,7 @@
 # This model is NOT a benchmark of any real system.
 
 label: "Checkpoint 1 — Single Prefill GPU, Single RTL Engine"
+checkpoint: 1
 
 workload:
   requests_per_sec:

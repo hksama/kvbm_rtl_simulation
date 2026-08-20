@@ -110,7 +110,7 @@ class LabeledValue:
 
 @dataclass
 class SimulationResult:
-    """Complete output of a checkpoint-1 simulation run."""
+    """Complete output of a simulation run."""
 
     software_latency_us: float = 0.0
     hardware_latency_us: float = 0.0

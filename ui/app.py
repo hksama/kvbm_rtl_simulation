@@ -1,9 +1,9 @@
-"""Streamlit UI for Checkpoint 1: Single Prefill GPU, Single RTL Engine."""
+"""Streamlit UI for KV metadata placement engine design-space exploration."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
@@ -13,9 +13,15 @@ import yaml
 from plotly.subplots import make_subplots
 
 from model.checkpoint1 import Checkpoint1Config, Checkpoint1Simulator, find_crossover_rps
-from model.types import HotnessModelType
+from model.checkpoint2 import Checkpoint2Simulator
+from model.types import HotnessModelType, SimulationResult
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "assumptions.yaml"
+
+CHECKPOINT_1 = "Checkpoint 1: Single Prefill GPU"
+CHECKPOINT_2 = "Checkpoint 2: Prefill Scaling"
+CHECKPOINT_OPTIONS = [CHECKPOINT_1, CHECKPOINT_2]
+PREFILL_GPU_OPTIONS_CP2 = [2, 4, 8, 16]
 
 WORKLOAD_PRESETS = {
     "Manual": None,
@@ -54,6 +60,29 @@ def load_default_config() -> Checkpoint1Config:
     if CONFIG_PATH.exists():
         return Checkpoint1Config.from_yaml(CONFIG_PATH)
     return Checkpoint1Config()
+
+
+class SimulatorProtocol(Protocol):
+    def run(self) -> SimulationResult: ...
+    def sweep_rps(self, rps_values: list[float]) -> list[tuple[float, SimulationResult]]: ...
+    def sweep_metadata_entries(self, entry_values: list[int]) -> list[tuple[int, SimulationResult]]: ...
+    def sweep_candidate_k(self, k_values: list[int]) -> list[tuple[int, SimulationResult]]: ...
+
+
+def create_simulator(checkpoint: str, config: Checkpoint1Config) -> SimulatorProtocol:
+    if checkpoint == CHECKPOINT_2:
+        return Checkpoint2Simulator(config)
+    return Checkpoint1Simulator(config)
+
+
+def run_simulation(checkpoint: str, config: Checkpoint1Config) -> SimulationResult:
+    return create_simulator(checkpoint, config).run()
+
+
+def checkpoint_description(checkpoint: str) -> str:
+    if checkpoint == CHECKPOINT_2:
+        return "**Checkpoint 2:** 2–16 Prefill GPUs · 1 RTL Engine · Prefill Scaling"
+    return "**Checkpoint 1:** 1 Prefill GPU · 1 RTL Engine · Hotness Tracker Focus"
 
 
 def render_summary(result, config: Checkpoint1Config, crossover_rps: float | None):
@@ -204,6 +233,115 @@ def hotness_distribution_chart(hotness_dist) -> go.Figure:
     return fig
 
 
+def prefill_gpu_utilization_chart(rows: list[dict[str, Any]], selected_gpus: int) -> go.Figure:
+    gpu_counts = [r["prefill_gpus"] for r in rows]
+    utils = [r["rtl_utilization"] * 100 for r in rows]
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=gpu_counts, y=utils, mode="lines+markers", name="RTL utilization",
+            line={"color": "#AB63FA", "width": 3}, marker={"size": 10},
+        )
+    )
+    for r in rows:
+        if r["prefill_gpus"] == selected_gpus:
+            fig.add_trace(go.Scatter(
+                x=[selected_gpus], y=[r["rtl_utilization"] * 100], mode="markers",
+                name="Selected", marker={"size": 16, "color": "#EF553B", "symbol": "star"},
+            ))
+            break
+    fig.add_hline(y=100, line_dash="dash", line_color="red", annotation_text="Saturation")
+    fig.update_layout(
+        title="Prefill GPUs vs RTL Utilization",
+        xaxis={"title": "Prefill GPUs", "type": "log", "dtick": 1},
+        yaxis={"title": "RTL Utilization (%)", "range": [0, 105]},
+        height=420,
+    )
+    return fig
+
+
+def prefill_gpu_latency_chart(rows: list[dict[str, Any]], selected_gpus: int) -> go.Figure:
+    gpu_counts = [r["prefill_gpus"] for r in rows]
+    sw_lat = [r["software_latency_us"] for r in rows]
+    hw_lat = [r["hardware_latency_us"] for r in rows]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=gpu_counts, y=sw_lat, mode="lines+markers", name="Software latency", line={"color": "#636EFA"}))
+    fig.add_trace(go.Scatter(x=gpu_counts, y=hw_lat, mode="lines+markers", name="RTL latency", line={"color": "#EF553B"}))
+    for r in rows:
+        if r["prefill_gpus"] == selected_gpus:
+            fig.add_trace(go.Scatter(
+                x=[selected_gpus, selected_gpus],
+                y=[r["software_latency_us"], r["hardware_latency_us"]],
+                mode="markers", name="Selected",
+                marker={"size": 14, "color": "#00CC96", "symbol": "diamond"},
+            ))
+            break
+    fig.update_layout(
+        title="Prefill GPUs vs Decision Latency",
+        xaxis={"title": "Prefill GPUs", "type": "log", "dtick": 1},
+        yaxis={"title": "Decision latency (µs)"},
+        height=420,
+    )
+    return fig
+
+
+def prefill_gpu_metadata_ops_chart(rows: list[dict[str, Any]], selected_gpus: int) -> go.Figure:
+    gpu_counts = [r["prefill_gpus"] for r in rows]
+    ops = [r["metadata_ops_per_sec"] for r in rows]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=gpu_counts, y=ops, mode="lines+markers", name="Metadata ops/s",
+        line={"color": "#00CC96", "width": 3}, fill="tozeroy",
+    ))
+    for r in rows:
+        if r["prefill_gpus"] == selected_gpus:
+            fig.add_trace(go.Scatter(
+                x=[selected_gpus], y=[r["metadata_ops_per_sec"]], mode="markers",
+                name="Selected", marker={"size": 16, "color": "#EF553B", "symbol": "star"},
+            ))
+            break
+    fig.update_layout(
+        title="Prefill GPUs vs Metadata Operations/sec",
+        xaxis={"title": "Prefill GPUs", "type": "log", "dtick": 1},
+        yaxis={"title": "Metadata ops/s"},
+        height=420,
+    )
+    return fig
+
+
+def prefill_scaling_summary_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "Prefill GPUs": r["prefill_gpus"],
+            "Metadata ops/s": f"{r['metadata_ops_per_sec']:,.0f}",
+            "SW latency (µs)": f"{r['software_latency_us']:.2f}",
+            "RTL latency (µs)": f"{r['hardware_latency_us']:.2f}",
+            "Speedup": f"{r['speedup']:.2f}×",
+            "RTL utilization": f"{r['rtl_utilization'] * 100:.1f}%",
+            "Region": r["region"],
+        }
+        for r in rows
+    ])
+
+
+@st.cache_data(show_spinner=False)
+def compute_prefill_scaling_sweep(config_key: tuple[tuple[str, Any], ...]) -> list[dict[str, Any]]:
+    config = Checkpoint1Config(**dict(config_key), prefill_gpus=2)
+    sweep = Checkpoint2Simulator(config).sweep_prefill_gpus()
+    return [
+        {
+            "prefill_gpus": p.prefill_gpus,
+            "rtl_utilization": p.result.rtl_utilization,
+            "software_latency_us": p.result.software_latency_us,
+            "hardware_latency_us": p.result.hardware_latency_us,
+            "metadata_ops_per_sec": p.result.metadata_ops_per_sec,
+            "speedup": p.result.speedup,
+            "region": p.result.region,
+        }
+        for p in sweep.points
+    ]
+
+
 def throughput_chart(result) -> go.Figure:
     categories = ["Theoretical", "Sustainable", "Achieved"]
     sw_ops = [
@@ -224,7 +362,10 @@ def throughput_chart(result) -> go.Figure:
 
 
 @st.cache_data(show_spinner=False)
-def compute_crossover_grid(config_key: tuple[tuple[str, Any], ...]) -> tuple[list[float], list[int], list[list[float]]]:
+def compute_crossover_grid(
+    config_key: tuple[tuple[str, Any], ...],
+    checkpoint: str,
+) -> tuple[list[float], list[int], list[list[float]]]:
     """Cache heatmap grid keyed by the full runtime configuration."""
     config = Checkpoint1Config(**dict(config_key))
     rps_range = np.logspace(2, 4.5, 15).tolist()
@@ -235,15 +376,15 @@ def compute_crossover_grid(config_key: tuple[tuple[str, Any], ...]) -> tuple[lis
         row: list[float] = []
         for rps in rps_range:
             cfg = Checkpoint1Config(**{**config.to_dict(), "num_kv_blocks": int(n), "requests_per_sec": float(rps)})
-            row.append(Checkpoint1Simulator(cfg).run().speedup)
+            row.append(run_simulation(checkpoint, cfg).speedup)
         z.append(row)
 
     return rps_range, meta_range, z
 
 
-def crossover_heatmap(config: Checkpoint1Config) -> go.Figure:
+def crossover_heatmap(config: Checkpoint1Config, checkpoint: str) -> go.Figure:
     config_key = tuple(sorted((k, v) for k, v in config.to_dict().items()))
-    rps_range, meta_range, z = compute_crossover_grid(config_key)
+    rps_range, meta_range, z = compute_crossover_grid(config_key, checkpoint)
 
     fig = go.Figure()
 
@@ -379,11 +520,12 @@ def build_runtime_parameter_rows(config: Checkpoint1Config, result) -> list[dict
     return rows
 
 
-def render_parameter_labels_tab(config: Checkpoint1Config, result):
+def render_parameter_labels_tab(config: Checkpoint1Config, result, checkpoint: str):
     st.markdown("### Configuration Assumptions")
+    cp_label = "Checkpoint 2" if checkpoint == CHECKPOINT_2 else "Checkpoint 1"
     st.caption(
-        "Every parameter is tagged as **ASSUMPTION**, **MEASURED**, or **DERIVED**. "
-        "Checkpoint 1 uses analytical assumptions only — no measured Dynamo numbers."
+        f"Every parameter is tagged as **ASSUMPTION**, **MEASURED**, or **DERIVED**. "
+        f"{cp_label} uses analytical assumptions only — no measured Dynamo numbers."
     )
 
     if CONFIG_PATH.exists():
@@ -414,14 +556,16 @@ def render_parameter_labels_tab(config: Checkpoint1Config, result):
             st.code(CONFIG_PATH.read_text(), language="yaml")
 
 
-def build_config_from_sidebar(defaults: Checkpoint1Config) -> Checkpoint1Config:
+def build_config_from_sidebar(defaults: Checkpoint1Config) -> tuple[str, Checkpoint1Config]:
     st.sidebar.header("Checkpoint Mode")
-    checkpoint = st.sidebar.selectbox(
-        "Checkpoint",
-        ["Checkpoint 1: Single Prefill GPU"],
-        index=0,
-    )
-    st.sidebar.caption("Only Checkpoint 1 is implemented.")
+    checkpoint = st.sidebar.selectbox("Checkpoint", CHECKPOINT_OPTIONS, index=0)
+
+    if checkpoint == CHECKPOINT_2:
+        st.sidebar.caption("Checkpoint 2: scale prefill GPUs (2, 4, 8, 16) with 1 RTL engine.")
+        prefill_gpus = st.sidebar.selectbox("Prefill GPUs", PREFILL_GPU_OPTIONS_CP2, index=1)
+    else:
+        st.sidebar.caption("Checkpoint 1: single prefill GPU, single RTL engine.")
+        prefill_gpus = 1
 
     st.sidebar.header("Workload")
     preset = st.sidebar.selectbox("Workload preset", list(WORKLOAD_PRESETS.keys()))
@@ -480,7 +624,7 @@ def build_config_from_sidebar(defaults: Checkpoint1Config) -> Checkpoint1Config:
     st.sidebar.header("Coordination")
     coord_latency = st.sidebar.number_input("Coordination latency (µs)", 0.0, 20.0, float(defaults.coordination_latency_us), 0.1)
 
-    return Checkpoint1Config(
+    return checkpoint, Checkpoint1Config(
         requests_per_sec=float(requests_per_sec),
         concurrent_requests=concurrent_requests,
         metadata_ops_per_request=metadata_ops,
@@ -512,41 +656,70 @@ def build_config_from_sidebar(defaults: Checkpoint1Config) -> Checkpoint1Config:
         hotness_gamma=hotness_gamma,
         hotness_decay_lambda=decay_lambda,
         coordination_latency_us=coord_latency,
-        prefill_gpus=1,
+        prefill_gpus=prefill_gpus,
         rtl_engines=1,
     )
 
 
+def render_prefill_scaling_tab(config: Checkpoint1Config, checkpoint: str):
+    st.markdown("### Prefill GPU Scaling")
+    if checkpoint != CHECKPOINT_2:
+        st.info("Switch to **Checkpoint 2: Prefill Scaling** in the sidebar to explore 2, 4, 8, and 16 prefill GPUs.")
+        st.caption("Checkpoint 1 is fixed at 1 prefill GPU.")
+        return
+
+    config_key = tuple(sorted((k, v) for k, v in config.to_dict().items() if k != "prefill_gpus"))
+    scaling_rows = compute_prefill_scaling_sweep(config_key)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.plotly_chart(prefill_gpu_utilization_chart(scaling_rows, config.prefill_gpus), use_container_width=True)
+    with col2:
+        st.plotly_chart(prefill_gpu_latency_chart(scaling_rows, config.prefill_gpus), use_container_width=True)
+
+    st.plotly_chart(prefill_gpu_metadata_ops_chart(scaling_rows, config.prefill_gpus), use_container_width=True)
+    st.markdown("#### Scaling Summary")
+    st.dataframe(prefill_scaling_summary_table(scaling_rows), use_container_width=True, hide_index=True)
+
+    max_util = max(r["rtl_utilization"] for r in scaling_rows)
+    if max_util >= 0.95:
+        st.warning(f"RTL engine approaching saturation at {max_util * 100:.0f}% utilization with current workload.")
+    else:
+        st.success(f"RTL engine has headroom — max utilization {max_util * 100:.0f}% across 2–16 GPUs.")
+
+
 def main():
     st.set_page_config(
-        page_title="KV Metadata Engine — Checkpoint 1",
+        page_title="KV Metadata Engine — Design Explorer",
         page_icon="⚡",
         layout="wide",
     )
 
     st.title("KV Metadata & Placement Engine — Design-Space Explorer")
+
+    defaults = load_default_config()
+    checkpoint, config = build_config_from_sidebar(defaults)
+
     st.markdown(
-        "**Checkpoint 1:** 1 Prefill GPU · 1 RTL Engine · Hotness Tracker Focus  \n"
+        f"{checkpoint_description(checkpoint)}  \n"
         "All parameters labelled **ASSUMPTION** unless measured. This is an analytical model, not a Dynamo benchmark."
     )
 
-    defaults = load_default_config()
-    config = build_config_from_sidebar(defaults)
-
-    sim = Checkpoint1Simulator(config)
+    sim = create_simulator(checkpoint, config)
     result = sim.run()
 
-    crossover_rps = find_crossover_rps(config)
+    crossover_rps = find_crossover_rps(config) if checkpoint == CHECKPOINT_1 else None
 
     render_summary(result, config, crossover_rps)
 
     st.divider()
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Latency & Throughput",
         "Crossover Analysis",
         "Hotness Tracker",
         "Parameter Labels",
+        "Prefill Scaling",
     ])
 
     with tab1:
@@ -573,7 +746,7 @@ def main():
             use_container_width=True,
         )
         with st.spinner("Computing crossover heatmap..."):
-            st.plotly_chart(crossover_heatmap(config), use_container_width=True)
+            st.plotly_chart(crossover_heatmap(config, checkpoint), use_container_width=True)
 
         region = result.region
         if region == "HARDWARE WORSE":
@@ -595,7 +768,10 @@ def main():
             st.metric("Hot blocks (sample)", f"{hot_pct:.1f}%")
 
     with tab4:
-        render_parameter_labels_tab(config, result)
+        render_parameter_labels_tab(config, result, checkpoint)
+
+    with tab5:
+        render_prefill_scaling_tab(config, checkpoint)
 
 
 if __name__ == "__main__":

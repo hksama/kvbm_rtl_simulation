@@ -14,14 +14,17 @@ from plotly.subplots import make_subplots
 
 from model.checkpoint1 import Checkpoint1Config, Checkpoint1Simulator, find_crossover_rps
 from model.checkpoint2 import Checkpoint2Simulator
+from model.checkpoint3 import Checkpoint3Simulator
+from model.scaling import PREFILL_GPU_OPTIONS_CP2, PREFILL_GPU_OPTIONS_CP3
 from model.types import HotnessModelType, SimulationResult
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "assumptions.yaml"
 
 CHECKPOINT_1 = "Checkpoint 1: Single Prefill GPU"
 CHECKPOINT_2 = "Checkpoint 2: Prefill Scaling"
-CHECKPOINT_OPTIONS = [CHECKPOINT_1, CHECKPOINT_2]
-PREFILL_GPU_OPTIONS_CP2 = [2, 4, 8, 16]
+CHECKPOINT_3 = "Checkpoint 3: High Prefill Scaling"
+CHECKPOINT_OPTIONS = [CHECKPOINT_1, CHECKPOINT_2, CHECKPOINT_3]
+PREFILL_SCALING_CHECKPOINTS = {CHECKPOINT_2, CHECKPOINT_3}
 
 WORKLOAD_PRESETS = {
     "Manual": None,
@@ -70,19 +73,47 @@ class SimulatorProtocol(Protocol):
 
 
 def create_simulator(checkpoint: str, config: Checkpoint1Config) -> SimulatorProtocol:
+    if checkpoint == CHECKPOINT_3:
+        return Checkpoint3Simulator(config)
     if checkpoint == CHECKPOINT_2:
         return Checkpoint2Simulator(config)
     return Checkpoint1Simulator(config)
+
+
+def scaling_simulator_class(checkpoint: str):
+    if checkpoint == CHECKPOINT_3:
+        return Checkpoint3Simulator
+    if checkpoint == CHECKPOINT_2:
+        return Checkpoint2Simulator
+    raise ValueError(f"No scaling simulator for {checkpoint}")
+
+
+def default_prefill_gpus(checkpoint: str) -> int:
+    if checkpoint == CHECKPOINT_3:
+        return 64
+    if checkpoint == CHECKPOINT_2:
+        return 4
+    return 1
+
+
+def checkpoint_description(checkpoint: str) -> str:
+    if checkpoint == CHECKPOINT_3:
+        return "**Checkpoint 3:** 32–128 Prefill GPUs · 1 RTL Engine · High-Scale Prefill"
+    if checkpoint == CHECKPOINT_2:
+        return "**Checkpoint 2:** 2–16 Prefill GPUs · 1 RTL Engine · Prefill Scaling"
+    return "**Checkpoint 1:** 1 Prefill GPU · 1 RTL Engine · Hotness Tracker Focus"
 
 
 def run_simulation(checkpoint: str, config: Checkpoint1Config) -> SimulationResult:
     return create_simulator(checkpoint, config).run()
 
 
-def checkpoint_description(checkpoint: str) -> str:
+def checkpoint_label(checkpoint: str) -> str:
+    if checkpoint == CHECKPOINT_3:
+        return "Checkpoint 3"
     if checkpoint == CHECKPOINT_2:
-        return "**Checkpoint 2:** 2–16 Prefill GPUs · 1 RTL Engine · Prefill Scaling"
-    return "**Checkpoint 1:** 1 Prefill GPU · 1 RTL Engine · Hotness Tracker Focus"
+        return "Checkpoint 2"
+    return "Checkpoint 1"
 
 
 def render_summary(result, config: Checkpoint1Config, crossover_rps: float | None):
@@ -325,9 +356,14 @@ def prefill_scaling_summary_table(rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def compute_prefill_scaling_sweep(config_key: tuple[tuple[str, Any], ...]) -> list[dict[str, Any]]:
-    config = Checkpoint1Config(**dict(config_key), prefill_gpus=2)
-    sweep = Checkpoint2Simulator(config).sweep_prefill_gpus()
+def compute_prefill_scaling_sweep(
+    config_key: tuple[tuple[str, Any], ...],
+    checkpoint: str,
+) -> list[dict[str, Any]]:
+    default_gpu = default_prefill_gpus(checkpoint)
+    config = Checkpoint1Config(**dict(config_key), prefill_gpus=default_gpu)
+    sim_class = scaling_simulator_class(checkpoint)
+    sweep = sim_class(config).sweep_prefill_gpus()
     return [
         {
             "prefill_gpus": p.prefill_gpus,
@@ -522,10 +558,9 @@ def build_runtime_parameter_rows(config: Checkpoint1Config, result) -> list[dict
 
 def render_parameter_labels_tab(config: Checkpoint1Config, result, checkpoint: str):
     st.markdown("### Configuration Assumptions")
-    cp_label = "Checkpoint 2" if checkpoint == CHECKPOINT_2 else "Checkpoint 1"
     st.caption(
         f"Every parameter is tagged as **ASSUMPTION**, **MEASURED**, or **DERIVED**. "
-        f"{cp_label} uses analytical assumptions only — no measured Dynamo numbers."
+        f"{checkpoint_label(checkpoint)} uses analytical assumptions only — no measured Dynamo numbers."
     )
 
     if CONFIG_PATH.exists():
@@ -560,7 +595,10 @@ def build_config_from_sidebar(defaults: Checkpoint1Config) -> tuple[str, Checkpo
     st.sidebar.header("Checkpoint Mode")
     checkpoint = st.sidebar.selectbox("Checkpoint", CHECKPOINT_OPTIONS, index=0)
 
-    if checkpoint == CHECKPOINT_2:
+    if checkpoint == CHECKPOINT_3:
+        st.sidebar.caption("Checkpoint 3: scale prefill GPUs (32, 64, 128) with 1 RTL engine.")
+        prefill_gpus = st.sidebar.selectbox("Prefill GPUs", PREFILL_GPU_OPTIONS_CP3, index=1)
+    elif checkpoint == CHECKPOINT_2:
         st.sidebar.caption("Checkpoint 2: scale prefill GPUs (2, 4, 8, 16) with 1 RTL engine.")
         prefill_gpus = st.sidebar.selectbox("Prefill GPUs", PREFILL_GPU_OPTIONS_CP2, index=1)
     else:
@@ -663,13 +701,20 @@ def build_config_from_sidebar(defaults: Checkpoint1Config) -> tuple[str, Checkpo
 
 def render_prefill_scaling_tab(config: Checkpoint1Config, checkpoint: str):
     st.markdown("### Prefill GPU Scaling")
-    if checkpoint != CHECKPOINT_2:
-        st.info("Switch to **Checkpoint 2: Prefill Scaling** in the sidebar to explore 2, 4, 8, and 16 prefill GPUs.")
+    if checkpoint == CHECKPOINT_1:
+        st.info("Switch to **Checkpoint 2** or **Checkpoint 3** in the sidebar to explore prefill GPU scaling.")
         st.caption("Checkpoint 1 is fixed at 1 prefill GPU.")
         return
 
+    if checkpoint == CHECKPOINT_2:
+        gpu_range = "2, 4, 8, and 16"
+    else:
+        gpu_range = "32, 64, and 128"
+
+    st.caption(f"Sweeping prefill GPUs: {gpu_range} · 1 RTL engine")
+
     config_key = tuple(sorted((k, v) for k, v in config.to_dict().items() if k != "prefill_gpus"))
-    scaling_rows = compute_prefill_scaling_sweep(config_key)
+    scaling_rows = compute_prefill_scaling_sweep(config_key, checkpoint)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -682,10 +727,17 @@ def render_prefill_scaling_tab(config: Checkpoint1Config, checkpoint: str):
     st.dataframe(prefill_scaling_summary_table(scaling_rows), use_container_width=True, hide_index=True)
 
     max_util = max(r["rtl_utilization"] for r in scaling_rows)
+    gpu_max = scaling_rows[-1]["prefill_gpus"]
     if max_util >= 0.95:
-        st.warning(f"RTL engine approaching saturation at {max_util * 100:.0f}% utilization with current workload.")
+        st.warning(
+            f"RTL engine approaching saturation at {max_util * 100:.0f}% utilization "
+            f"with current workload (up to {gpu_max} prefill GPUs)."
+        )
     else:
-        st.success(f"RTL engine has headroom — max utilization {max_util * 100:.0f}% across 2–16 GPUs.")
+        st.success(
+            f"RTL engine has headroom — max utilization {max_util * 100:.0f}% "
+            f"across {gpu_range} prefill GPUs."
+        )
 
 
 def main():

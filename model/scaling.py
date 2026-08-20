@@ -1,4 +1,4 @@
-"""Prefill GPU scaling model for checkpoint 2."""
+"""Prefill GPU scaling model for checkpoints 2 and 3."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from model.checkpoint1 import Checkpoint1Config
 from model.software import scaling_factor_n
 
 PREFILL_GPU_OPTIONS_CP2 = [2, 4, 8, 16]
+PREFILL_GPU_OPTIONS_CP3 = [32, 64, 128]
 
 
 def apply_prefill_scaling(config: Checkpoint1Config) -> Checkpoint1Config:

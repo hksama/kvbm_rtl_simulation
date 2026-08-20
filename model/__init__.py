@@ -2,12 +2,14 @@
 
 from model.checkpoint1 import Checkpoint1Config, Checkpoint1Simulator, SimulationResult
 from model.checkpoint2 import Checkpoint2Simulator, PrefillScalingSweep
+from model.checkpoint3 import Checkpoint3Simulator
 from model.types import ParameterLabel
 
 __all__ = [
     "Checkpoint1Config",
     "Checkpoint1Simulator",
     "Checkpoint2Simulator",
+    "Checkpoint3Simulator",
     "PrefillScalingSweep",
     "SimulationResult",
     "ParameterLabel",

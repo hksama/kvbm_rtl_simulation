@@ -5,6 +5,8 @@
 label: "Checkpoint 1 — Single Prefill GPU, Single RTL Engine"
 checkpoint: 1
 
+# Checkpoint 3 explores 32, 64, 128 prefill GPUs (see model/checkpoint3.py)
+
 workload:
   requests_per_sec:
     value: 1000

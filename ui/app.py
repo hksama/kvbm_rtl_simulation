@@ -17,6 +17,7 @@ from model.checkpoint2 import Checkpoint2Simulator
 from model.checkpoint3 import Checkpoint3Simulator
 from model.scaling import PREFILL_GPU_OPTIONS_CP2, PREFILL_GPU_OPTIONS_CP3
 from model.types import HotnessModelType, SimulationResult
+from ui.topology_ui import render_topology_section
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "assumptions.yaml"
 
@@ -766,12 +767,13 @@ def main():
 
     st.divider()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "Latency & Throughput",
         "Crossover Analysis",
         "Hotness Tracker",
         "Parameter Labels",
         "Prefill Scaling",
+        "Topology & PCIe",
     ])
 
     with tab1:
@@ -824,6 +826,9 @@ def main():
 
     with tab5:
         render_prefill_scaling_tab(config, checkpoint)
+
+    with tab6:
+        render_topology_section()
 
 
 if __name__ == "__main__":

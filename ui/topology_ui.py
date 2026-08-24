@@ -18,24 +18,32 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from model.interconnect.pcie import (
+    DMAEngine,
+    DMAOperation,
     PCIeGeneration,
     PCIeMPS,
     PCIeMRRS,
     PCIeWidth,
+    compute_dma_transfer,
     compute_pcie_bandwidth,
     compute_read_latency_us,
     compute_write_latency_us,
+    fragment_transfer,
+    flit_summary,
+    tlp_summary,
 )
 from model.topology import Edge, InterconnectType, Node, NodeType, Topology
 from ui.topology_state import (
     ARCHITECTURE_PRESETS,
     get_bundle,
+    get_default_dma_dict,
     get_default_pcie_dict,
     get_positions,
     get_topology,
     init_topology_session,
     load_preset,
     pcie_config_from_dict,
+    set_default_dma_dict,
     set_default_pcie_dict,
     sync_topology,
 )
@@ -58,7 +66,8 @@ NODE_COLORS = {
     NodeType.PCIE_ROOT_COMPLEX.value: "#FECB52",
     NodeType.PCIE_SWITCH.value: "#B6E880",
     NodeType.ROUTER.value: "#FF97FF",
-    NodeType.MEMORY.value: "#A0A0A0",
+    NodeType.MEMORY.value: "#C4B5A0",
+    NodeType.NVSWITCH.value: "#76D7C4",
 }
 
 
@@ -278,6 +287,8 @@ def topology_graph_figure(
     for node in topology.nodes.values():
         pos = positions.get(node.id, (0.0, 0.0))
         color = NODE_COLORS.get(node.type.value, "#777777")
+        if node.metadata.get("memory_type") == "HBM":
+            color = "#D4AC0D" if node.metadata.get("role") == "prefill_kv_cache" else "#E67E22"
         if node.id in highlight_nodes:
             color = "#FFD700"
         fig.add_trace(
@@ -663,11 +674,136 @@ def render_path_inspector_tab() -> None:
     st.dataframe(pd.DataFrame(hop_rows), use_container_width=True, hide_index=True)
 
 
+def render_dma_tlp_flit_tab() -> None:
+    init_topology_session()
+    default_pcie = get_default_pcie_dict()
+    default_dma = get_default_dma_dict()
+    pcie = pcie_config_from_dict(default_pcie)
+
+    st.markdown("### DMA / TLP / FLIT Analysis")
+    st.caption(
+        "DMA operates through PCIe (never bypassing the link). "
+        "TLP fragmentation and Gen6 FLIT packing affect serialization."
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### DMA Engine")
+        queue_depth = st.number_input("Queue depth", 1, 4096, int(default_dma["queue_depth"]), key="dma_qd")
+        max_outstanding = st.number_input(
+            "Max outstanding reads", 1, 256, int(default_dma["max_outstanding_reads"]), key="dma_mor"
+        )
+        request_size = st.number_input("Request size (B)", 64, 65536, int(default_dma["request_size"]), key="dma_req")
+        completion_size = st.number_input(
+            "Completion size (B)", 64, 65536, int(default_dma["completion_size"]), key="dma_cpl"
+        )
+        read_lat = st.number_input(
+            "DMA read overhead (µs)", 0.0, 10.0, float(default_dma["read_latency_us"]), key="dma_rlat"
+        )
+        write_lat = st.number_input(
+            "DMA write overhead (µs)", 0.0, 10.0, float(default_dma["write_latency_us"]), key="dma_wlat"
+        )
+        if st.button("Save DMA engine defaults"):
+            set_default_dma_dict({
+                "queue_depth": int(queue_depth),
+                "max_outstanding_reads": int(max_outstanding),
+                "request_size": int(request_size),
+                "completion_size": int(completion_size),
+                "read_latency_us": float(read_lat),
+                "write_latency_us": float(write_lat),
+            })
+            st.success("DMA defaults saved.")
+
+    with col2:
+        st.markdown("#### Transfer under test")
+        payload_mb = st.slider("Payload (MB)", 0.0, 64.0, 4.0, 0.5, key="dma_payload_mb")
+        payload_bytes = int(payload_mb * 1024 * 1024)
+        operation = st.radio("DMA operation", ["DMA_WRITE", "DMA_READ"], horizontal=True, key="dma_op")
+        requester = st.text_input("Requester", value="KVBM FPGA", key="dma_requester")
+        completer = st.text_input("Completer / Memory", value="Prefill HBM Cache", key="dma_completer")
+
+    engine = DMAEngine(
+        queue_depth=int(queue_depth),
+        max_outstanding_reads=int(max_outstanding),
+        request_size=int(request_size),
+        completion_size=int(completion_size),
+        read_latency_us=float(read_lat),
+        write_latency_us=float(write_lat),
+    )
+    dma_op = DMAOperation.DMA_READ if operation == "DMA_READ" else DMAOperation.DMA_WRITE
+    dma_result = compute_dma_transfer(
+        pcie, engine, payload_bytes, dma_op, requester=requester, completer=completer
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Total DMA time", f"{dma_result.total_time_us:.2f} µs")
+    with m2:
+        st.metric("PCIe latency", f"{dma_result.pcie_latency_us:.2f} µs")
+    with m3:
+        st.metric("TLP on-wire bytes", f"{dma_result.tlp_on_wire_bytes:,}")
+    with m4:
+        st.metric("Serialized bytes", f"{dma_result.serialized_bytes:,}")
+
+    st.markdown("#### TLP fragmentation")
+    if operation == "DMA_WRITE":
+        tlps = fragment_transfer(payload_bytes, pcie.mps)
+        tlp_info = tlp_summary(payload_bytes, pcie.mps)
+    else:
+        from model.interconnect.pcie import fragment_read_transfer
+        reqs, cpls = fragment_read_transfer(payload_bytes, pcie.mps, pcie.mrrs.value)
+        tlps = reqs + cpls
+        tlp_info = {
+            "tlp_count": len(reqs) + len(cpls),
+            "on_wire_bytes": dma_result.tlp_on_wire_bytes,
+            "header_overhead_bytes": dma_result.tlp_on_wire_bytes - payload_bytes,
+        }
+
+    tlp_df = pd.DataFrame([
+        {"Field": "Payload bytes", "Value": payload_bytes},
+        {"Field": "TLP count", "Value": tlp_info.get("tlp_count", len(tlps))},
+        {"Field": "MPS", "Value": pcie.mps.value},
+        {"Field": "MRRS", "Value": pcie.mrrs.value},
+        {"Field": "On-wire bytes (TLP)", "Value": dma_result.tlp_on_wire_bytes},
+        {"Field": "Header overhead (B)", "Value": tlp_info.get("header_overhead_bytes", 0)},
+        {"Field": "Request TLPs", "Value": dma_result.request_tlps},
+        {"Field": "Completion TLPs", "Value": dma_result.completion_tlps},
+    ])
+    st.dataframe(tlp_df, use_container_width=True, hide_index=True)
+
+    if pcie.generation == PCIeGeneration.GEN6:
+        st.markdown("#### Gen6 FLIT packing")
+        flit_info = flit_summary(dma_result.tlp_on_wire_bytes)
+        flit_df = pd.DataFrame([
+            {"Field": "FLIT size (B)", "Value": flit_info["flit_size_bytes"]},
+            {"Field": "FLIT count", "Value": flit_info["flit_count"]},
+            {"Field": "FLIT on-wire bytes", "Value": flit_info["flit_on_wire_bytes"]},
+            {"Field": "FLIT overhead (B)", "Value": flit_info["flit_overhead_bytes"]},
+            {"Field": "FLIT efficiency", "Value": f"{flit_info['efficiency']:.3f}"},
+        ])
+        st.dataframe(flit_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Select **Gen6** in default PCIe settings to see FLIT packing analysis.")
+
+    st.markdown("#### DMA latency breakdown")
+    st.dataframe(
+        pd.DataFrame([
+            {"Component": "PCIe transfer", "Time (µs)": f"{dma_result.pcie_latency_us:.3f}", "Label": dma_result.label},
+            {"Component": "DMA engine overhead", "Time (µs)": f"{dma_result.dma_overhead_us:.3f}", "Label": dma_result.label},
+            {"Component": "Queue penalty", "Time (µs)": f"{dma_result.queue_penalty_us:.3f}", "Label": dma_result.label},
+            {"Component": "Total", "Time (µs)": f"{dma_result.total_time_us:.3f}", "Label": dma_result.label},
+        ]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def render_topology_section() -> None:
-    tab_topo, tab_pcie, tab_path = st.tabs([
+    tab_topo, tab_pcie, tab_path, tab_dma = st.tabs([
         "Topology Designer",
         "Interconnect / PCIe",
         "Path Inspector",
+        "DMA / TLP / FLIT",
     ])
     with tab_topo:
         render_topology_designer_tab()
@@ -675,6 +811,8 @@ def render_topology_section() -> None:
         render_interconnect_tab()
     with tab_path:
         render_path_inspector_tab()
+    with tab_dma:
+        render_dma_tlp_flit_tab()
 
 
 def main() -> None:

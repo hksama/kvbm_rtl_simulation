@@ -1,6 +1,7 @@
 """Layer 4: Topology / system graph model."""
 
 from model.topology.graph import Topology
+from model.topology.presets import ARCHITECTURE_PRESETS, build_preset
 from model.topology.types import (
     Edge,
     InterconnectType,
@@ -11,6 +12,7 @@ from model.topology.types import (
 )
 
 __all__ = [
+    "ARCHITECTURE_PRESETS",
     "Edge",
     "InterconnectType",
     "Node",
@@ -18,4 +20,5 @@ __all__ = [
     "Path",
     "PathSummary",
     "Topology",
+    "build_preset",
 ]

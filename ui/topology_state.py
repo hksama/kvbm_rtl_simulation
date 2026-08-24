@@ -8,9 +8,14 @@ import streamlit as st
 
 from model.interconnect.pcie import PCIeConfig, PCIeGeneration, PCIeMPS, PCIeMRRS, PCIeWidth
 from model.topology import Edge, InterconnectType, Node, NodeType, Topology
-
+from model.topology.presets import (
+    ARCHITECTURE_PRESETS,
+    build_preset,
+    preset_architecture_a,
+)
 
 SESSION_KEY = "kvbm_topology_bundle"
+DMA_SESSION_KEY = "kvbm_dma_engine"
 
 
 def _default_pcie_dict() -> dict[str, Any]:
@@ -29,6 +34,17 @@ def _default_pcie_dict() -> dict[str, Any]:
         "endpoint_processing_us": 0.1,
         "memory_processing_us": 0.1,
         "congestion_base_penalty_us": 0.05,
+    }
+
+
+def _default_dma_dict() -> dict[str, Any]:
+    return {
+        "queue_depth": 64,
+        "max_outstanding_reads": 16,
+        "request_size": 4096,
+        "completion_size": 4096,
+        "read_latency_us": 0.1,
+        "write_latency_us": 0.05,
     }
 
 
@@ -141,6 +157,7 @@ def topology_to_bundle(
     topology: Topology,
     positions: dict[str, tuple[float, float]],
     default_pcie: dict[str, Any],
+    default_dma: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "nodes": [_node_to_dict(n) for n in topology.nodes.values()],
@@ -151,14 +168,15 @@ def topology_to_bundle(
         },
         "positions": {node_id: list(pos) for node_id, pos in positions.items()},
         "default_pcie": default_pcie,
+        "default_dma": default_dma or _default_dma_dict(),
     }
 
 
 def init_topology_session() -> None:
     if SESSION_KEY not in st.session_state:
-        topology, positions = preset_architecture_a()
+        topology, positions = preset_architecture_a(pcie_config_from_dict(_default_pcie_dict()))
         st.session_state[SESSION_KEY] = topology_to_bundle(
-            topology, positions, _default_pcie_dict()
+            topology, positions, _default_pcie_dict(), _default_dma_dict()
         )
 
 
@@ -194,90 +212,31 @@ def set_default_pcie_dict(data: dict[str, Any]) -> None:
     save_bundle(bundle)
 
 
-def preset_architecture_a() -> tuple[Topology, dict[str, tuple[float, float]]]:
-    topology = Topology()
-    positions = {
-        "cpu": (0.0, 0.0),
-        "fpga": (0.0, -200.0),
-    }
-    topology.add_node(Node(id="cpu", type=NodeType.CPU, name="CPU"))
-    topology.add_node(Node(id="fpga", type=NodeType.FPGA, name="KVBM FPGA"))
-    config = pcie_config_from_dict(_default_pcie_dict())
-    topology.connect_pcie("cpu_fpga", "cpu", "fpga", config)
-    return topology, positions
+def get_default_dma_dict() -> dict[str, Any]:
+    bundle = get_bundle()
+    return dict(bundle.get("default_dma", _default_dma_dict()))
 
 
-def preset_architecture_b() -> tuple[Topology, dict[str, tuple[float, float]]]:
-    topology = Topology()
-    positions = {
-        "cpu": (0.0, 200.0),
-        "rc": (0.0, 80.0),
-        "switch": (0.0, -40.0),
-        "fpga": (0.0, -200.0),
-    }
-    topology.add_node(Node(id="cpu", type=NodeType.CPU, name="CPU"))
-    topology.add_node(Node(id="rc", type=NodeType.PCIE_ROOT_COMPLEX, name="PCIe Root Complex"))
-    topology.add_node(Node(id="switch", type=NodeType.PCIE_SWITCH, name="PCIe Switch"))
-    topology.add_node(Node(id="fpga", type=NodeType.FPGA, name="KVBM FPGA"))
-    config = pcie_config_from_dict(_default_pcie_dict())
-    topology.connect_pcie("cpu_rc", "cpu", "rc", config)
-    sw_config = pcie_config_from_dict({**_default_pcie_dict(), "switch_hops": 1})
-    topology.connect_pcie("rc_switch", "rc", "switch", sw_config)
-    topology.connect_pcie("switch_fpga", "switch", "fpga", sw_config)
-    return topology, positions
-
-
-def preset_architecture_c() -> tuple[Topology, dict[str, tuple[float, float]]]:
-    topology = Topology()
-    positions = {
-        "cpu": (0.0, 200.0),
-        "rc": (0.0, 60.0),
-        "gpu": (-180.0, -120.0),
-        "fpga": (180.0, -120.0),
-    }
-    topology.add_node(Node(id="cpu", type=NodeType.CPU, name="CPU"))
-    topology.add_node(Node(id="rc", type=NodeType.PCIE_ROOT_COMPLEX, name="PCIe Root Complex"))
-    topology.add_node(Node(id="gpu", type=NodeType.GPU, name="GPU"))
-    topology.add_node(Node(id="fpga", type=NodeType.FPGA, name="KVBM FPGA"))
-    config = pcie_config_from_dict(_default_pcie_dict())
-    topology.connect_pcie("cpu_rc", "cpu", "rc", config)
-    topology.connect_pcie("rc_gpu", "rc", "gpu", config)
-    topology.connect_pcie("rc_fpga", "rc", "fpga", config)
-    return topology, positions
-
-
-def preset_architecture_d() -> tuple[Topology, dict[str, tuple[float, float]]]:
-    topology = Topology()
-    positions = {
-        "prefill": (0.0, 200.0),
-        "kvbm": (0.0, 0.0),
-        "decode": (0.0, -200.0),
-    }
-    topology.add_node(Node(id="prefill", type=NodeType.PREFILL_POOL, name="Prefill GPU Pool"))
-    topology.add_node(Node(id="kvbm", type=NodeType.KVBM_ENGINE, name="KVBM FPGA"))
-    topology.add_node(Node(id="decode", type=NodeType.DECODE_POOL, name="Decode GPU Pool"))
-    config = pcie_config_from_dict(_default_pcie_dict())
-    topology.connect_pcie("prefill_kvbm", "prefill", "kvbm", config)
-    topology.connect_pcie("kvbm_decode", "kvbm", "decode", config)
-    return topology, positions
-
-
-ARCHITECTURE_PRESETS = {
-    "Architecture A — CPU ↔ FPGA (direct PCIe)": preset_architecture_a,
-    "Architecture B — CPU → RC → Switch → FPGA": preset_architecture_b,
-    "Architecture C — CPU → RC → GPU + FPGA": preset_architecture_c,
-    "Architecture D — Prefill → KVBM → Decode": preset_architecture_d,
-}
+def set_default_dma_dict(data: dict[str, Any]) -> None:
+    bundle = get_bundle()
+    bundle["default_dma"] = data
+    save_bundle(bundle)
 
 
 def load_preset(name: str) -> None:
-    factory = ARCHITECTURE_PRESETS[name]
-    topology, positions = factory()
-    save_bundle(topology_to_bundle(topology, positions, get_default_pcie_dict()))
+    topology, positions = build_preset(name, pcie_config_from_dict(get_default_pcie_dict()))
+    save_bundle(topology_to_bundle(topology, positions, get_default_pcie_dict(), get_default_dma_dict()))
 
 
 def sync_topology(topology: Topology, positions: dict[str, tuple[float, float]]) -> None:
-    save_bundle(topology_to_bundle(topology, positions, get_default_pcie_dict()))
+    save_bundle(
+        topology_to_bundle(
+            topology,
+            positions,
+            get_default_pcie_dict(),
+            get_default_dma_dict(),
+        )
+    )
 
 
 if __name__ == "__main__":

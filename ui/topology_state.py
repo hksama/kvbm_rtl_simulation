@@ -218,6 +218,28 @@ def set_default_dma_dict(data: dict[str, Any]) -> None:
     save_bundle(bundle)
 
 
+def get_default_nvlink_dict() -> dict[str, Any]:
+    bundle = get_bundle()
+    return dict(bundle.get("default_nvlink", _default_nvlink_dict()))
+
+
+def set_default_nvlink_dict(data: dict[str, Any]) -> None:
+    bundle = get_bundle()
+    bundle["default_nvlink"] = data
+    save_bundle(bundle)
+
+
+def get_default_infiniband_dict() -> dict[str, Any]:
+    bundle = get_bundle()
+    return dict(bundle.get("default_infiniband", _default_infiniband_dict()))
+
+
+def set_default_infiniband_dict(data: dict[str, Any]) -> None:
+    bundle = get_bundle()
+    bundle["default_infiniband"] = data
+    save_bundle(bundle)
+
+
 def load_preset(name: str) -> None:
     topology, positions = build_preset(name, pcie_config_from_dict(get_default_pcie_dict()))
     save_bundle(topology_to_bundle(topology, positions, get_default_pcie_dict(), get_default_dma_dict()))

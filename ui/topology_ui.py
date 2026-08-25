@@ -33,11 +33,30 @@ from model.interconnect.pcie import (
     tlp_summary,
 )
 from model.topology import Edge, InterconnectType, Node, NodeType, Topology
+from model.components.registry import (
+    attach_node_config,
+    default_node_config_dict,
+    get_preset,
+    list_presets,
+)
+from model.interconnect.infiniband import (
+    compute_infiniband_bandwidth,
+    infiniband_config_from_dict,
+    infiniband_config_to_dict,
+)
+from model.interconnect.nvlink import (
+    compute_nvlink_bandwidth,
+    nvlink_config_from_dict,
+    nvlink_config_to_dict,
+)
+from model.topology.io import TopologyFormatError
 from ui.topology_state import (
     ARCHITECTURE_PRESETS,
     export_topology_yaml_text,
     get_bundle,
     get_default_dma_dict,
+    get_default_infiniband_dict,
+    get_default_nvlink_dict,
     get_default_pcie_dict,
     get_positions,
     get_topology,
@@ -46,12 +65,11 @@ from ui.topology_state import (
     load_topology_from_text,
     pcie_config_from_dict,
     set_default_dma_dict,
+    set_default_infiniband_dict,
+    set_default_nvlink_dict,
     set_default_pcie_dict,
     sync_topology,
 )
-from model.interconnect.infiniband import infiniband_config_from_dict
-from model.interconnect.nvlink import nvlink_config_from_dict
-from model.topology.io import DEFAULT_INFINIBAND, DEFAULT_NVLINK, TopologyFormatError
 
 
 NODE_TYPE_OPTIONS = {t.value: t for t in NodeType}
@@ -75,6 +93,24 @@ NODE_COLORS = {
     NodeType.PCIE_ROOT_COMPLEX.value: "#FECB52",
     NodeType.PCIE_SWITCH.value: "#B6E880",
 }
+
+NODE_TYPE_LABELS = {
+    NodeType.HBM_MEMORY.value: "HBM Memory",
+    NodeType.PCIE_ROOT_COMPLEX.value: "PCIe Root Complex",
+    NodeType.PCIE_SWITCH.value: "PCIe Switch",
+    NodeType.PREFILL_POOL.value: "Prefill Pool",
+    NodeType.DECODE_POOL.value: "Decode Pool",
+}
+
+DERIVED_CONFIG_FIELDS = frozenset({
+    "aggregate_bandwidth_GBps",
+    "raw_bandwidth_GBps",
+    "effective_bandwidth_GBps",
+})
+
+
+def _node_type_label(value: str) -> str:
+    return NODE_TYPE_LABELS.get(value, value.replace("_", " ").title())
 
 
 def _slug(name: str) -> str:
@@ -236,6 +272,137 @@ def render_pcie_config_form(
     return updated
 
 
+def render_dict_config_form(
+    data: dict[str, Any],
+    *,
+    key_prefix: str,
+    title: str,
+    derived_fields: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Generic editor for component config dicts (ASSUMPTION fields)."""
+    derived = derived_fields or DERIVED_CONFIG_FIELDS
+    st.markdown(f"#### {title}")
+    st.caption("Parameter values are **ASSUMPTION** or **DERIVED** analytical estimates.")
+
+    updated: dict[str, Any] = {}
+    items = list(data.items())
+    cols = st.columns(2)
+    for index, (field, value) in enumerate(items):
+        col = cols[index % 2]
+        label = field.replace("_", " ")
+        tag = "DERIVED" if field in derived else "ASSUMPTION"
+        with col:
+            if isinstance(value, bool):
+                updated[field] = st.checkbox(
+                    f"{label} ({tag})",
+                    value=bool(value),
+                    key=f"{key_prefix}_{field}",
+                )
+            elif isinstance(value, int) and not isinstance(value, bool):
+                updated[field] = int(st.number_input(
+                    f"{label} ({tag})",
+                    value=int(value),
+                    step=1,
+                    key=f"{key_prefix}_{field}",
+                ))
+            elif isinstance(value, float):
+                updated[field] = float(st.number_input(
+                    f"{label} ({tag})",
+                    value=float(value),
+                    key=f"{key_prefix}_{field}",
+                ))
+            else:
+                updated[field] = st.text_input(
+                    f"{label} ({tag})",
+                    value=str(value),
+                    key=f"{key_prefix}_{field}",
+                )
+    return updated
+
+
+def render_nvlink_config_form(
+    data: dict[str, Any],
+    *,
+    key_prefix: str,
+    title: str = "NVLink Parameters",
+) -> dict[str, Any]:
+    updated = render_dict_config_form(data, key_prefix=key_prefix, title=title)
+    config = nvlink_config_from_dict(updated)
+    bw = compute_nvlink_bandwidth(config)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("RAW bandwidth (per direction)", f"{bw.raw_GBps:.2f} GB/s", help="ASSUMPTION")
+    with c2:
+        st.metric("EFFECTIVE bandwidth", f"{bw.effective_GBps:.2f} GB/s", help="DERIVED")
+    return nvlink_config_to_dict(config)
+
+
+def render_infiniband_config_form(
+    data: dict[str, Any],
+    *,
+    key_prefix: str,
+    title: str = "InfiniBand Parameters",
+) -> dict[str, Any]:
+    updated = render_dict_config_form(data, key_prefix=key_prefix, title=title)
+    config = infiniband_config_from_dict(updated)
+    bw = compute_infiniband_bandwidth(config)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("RAW bandwidth", f"{bw.raw_GBps:.2f} GB/s", help="DERIVED from line rate")
+    with c2:
+        st.metric("EFFECTIVE bandwidth", f"{bw.effective_GBps:.2f} GB/s", help="DERIVED")
+    return infiniband_config_to_dict(config)
+
+
+def _forward_edges(topology: Topology) -> list[Edge]:
+    return [e for e in topology.edges.values() if not e.id.endswith("_rev")]
+
+
+def _replace_link(
+    topology: Topology,
+    edge_id: str,
+    interconnect: str,
+    *,
+    pcie_data: dict[str, Any] | None = None,
+    nvlink_data: dict[str, Any] | None = None,
+    ib_data: dict[str, Any] | None = None,
+) -> None:
+    edge = topology.edges.get(edge_id)
+    if edge is None:
+        return
+    source_id = edge.source_id
+    dest_id = edge.dest_id
+    bidirectional = f"{edge_id}_rev" in topology.edges
+    enabled = edge.enabled
+    serialization = edge.serialization_enabled
+    congestion = edge.congestion_factor
+    metadata = dict(edge.metadata)
+
+    topology.remove_edge(edge_id)
+    rev_id = f"{edge_id}_rev"
+    if rev_id in topology.edges:
+        topology.remove_edge(rev_id)
+
+    if interconnect == InterconnectType.PCIE.value:
+        config = pcie_config_from_dict(pcie_data or get_default_pcie_dict())
+        topology.connect_pcie(edge_id, source_id, dest_id, config, bidirectional=bidirectional)
+    elif interconnect == InterconnectType.NVLINK.value:
+        config = nvlink_config_from_dict(nvlink_data or get_default_nvlink_dict())
+        topology.connect_nvlink(edge_id, source_id, dest_id, config, bidirectional=bidirectional)
+    else:
+        config = infiniband_config_from_dict(ib_data or get_default_infiniband_dict())
+        topology.connect_infiniband(edge_id, source_id, dest_id, config, bidirectional=bidirectional)
+
+    for eid in [edge_id] + ([rev_id] if bidirectional else []):
+        updated = topology.edges.get(eid)
+        if updated is None:
+            continue
+        updated.enabled = enabled
+        updated.serialization_enabled = serialization
+        updated.congestion_factor = congestion
+        updated.metadata = metadata
+
+
 def topology_graph_figure(
     topology: Topology,
     positions: dict[str, tuple[float, float]],
@@ -265,7 +432,7 @@ def topology_graph_figure(
         is_highlight = edge.id in highlight_edges or f"{edge.id}_rev" in highlight_edges
         color = "#FFD700" if is_highlight else "#888888"
         width = 4 if is_highlight else 2
-        label = f"{edge.generation} {edge.width} PCIe"
+        label = f"{edge.generation} {edge.width} {edge.interconnect_type.value}"
 
         fig.add_trace(
             go.Scatter(
@@ -319,7 +486,7 @@ def topology_graph_figure(
         )
 
     fig.update_layout(
-        title="System Topology (PCIe links shown as edges)",
+        title="System Topology",
         xaxis={"visible": False, "scaleanchor": "y", "scaleratio": 1},
         yaxis={"visible": False},
         height=520,
@@ -342,8 +509,8 @@ def render_topology_designer_tab() -> None:
 
     st.markdown("### Topology Designer")
     st.caption(
-        "Build a system graph by adding nodes and PCIe (or generic) links. "
-        "Load an architecture preset, then customize links and PCIe parameters."
+        "Build a system graph by adding nodes and interconnect links (PCIe, NVLink, InfiniBand). "
+        "Load an architecture preset, apply component presets, then customize parameters."
     )
 
     preset_col, action_col = st.columns([2, 1])
@@ -359,8 +526,8 @@ def render_topology_designer_tab() -> None:
 
     with st.expander("Topology YAML — load / export", expanded=False):
         st.caption(
-            "Declarative format (`schema_version: 1`) covering nodes, links, interconnect types, "
-            "PCIe config, layout positions, and default PCIe/DMA settings."
+            "Declarative format (`schema_version: 2`) covering nodes, node configs, links, "
+            "PCIe/NVLink/InfiniBand configs, layout positions, and defaults."
         )
         example_path = _ROOT / "configs" / "topologies" / "worker_pools_hbm.yaml"
         if example_path.exists():
@@ -405,7 +572,11 @@ def render_topology_designer_tab() -> None:
         st.markdown("#### Nodes")
         with st.form("create_node_form", clear_on_submit=True):
             node_name = st.text_input("Node name", value="GPU 0")
-            node_type = st.selectbox("Node type", list(NODE_TYPE_OPTIONS.keys()))
+            node_type = st.selectbox(
+                "Node type",
+                list(NODE_TYPE_OPTIONS.keys()),
+                format_func=_node_type_label,
+            )
             node_id_input = st.text_input("Node ID (optional)", value="")
             submitted = st.form_submit_button("Create node")
             if submitted:
@@ -413,19 +584,55 @@ def render_topology_designer_tab() -> None:
                 if node_id in topology.nodes:
                     st.error(f"Node ID `{node_id}` already exists.")
                 else:
+                    config = default_node_config_dict(node_type)
                     topology.add_node(
-                        Node(id=node_id, type=NODE_TYPE_OPTIONS[node_type], name=node_name)
+                        Node(id=node_id, type=NODE_TYPE_OPTIONS[node_type], name=node_name),
+                        config=config,
                     )
                     positions[node_id] = _auto_position(node_id, len(topology.nodes), len(topology.nodes))
                     sync_topology(topology, positions)
                     st.rerun()
 
         if topology.nodes:
-            delete_node = st.selectbox(
-                "Delete node",
+            st.markdown("#### Edit node config")
+            edit_node = st.selectbox(
+                "Select node",
                 options=list(topology.nodes.keys()),
                 format_func=lambda nid: topology.nodes[nid].name,
+                key="edit_node_select",
             )
+            node = topology.nodes[edit_node]
+            node_type_value = node.type.value
+            presets = list_presets(node_type_value)
+            preset_col, apply_col = st.columns([2, 1])
+            with preset_col:
+                preset_choice = st.selectbox(
+                    "Component preset",
+                    ["(custom)"] + presets,
+                    key=f"node_preset_{edit_node}",
+                )
+            with apply_col:
+                if st.button("Apply preset", key=f"apply_node_preset_{edit_node}"):
+                    if preset_choice != "(custom)":
+                        preset_data = get_preset(node_type_value, preset_choice)
+                        topology.add_node(node, config=preset_data)
+                        sync_topology(topology, positions)
+                        st.rerun()
+
+            current_config = dict(topology.node_configs.get(edit_node, default_node_config_dict(node_type_value)))
+            edited_config = render_dict_config_form(
+                current_config,
+                key_prefix=f"node_cfg_{edit_node}",
+                title=f"Parameters for `{node.name}` ({_node_type_label(node_type_value)})",
+            )
+            if st.button("Save node config", key=f"save_node_cfg_{edit_node}"):
+                validated = attach_node_config(node_type_value, edited_config)
+                topology.add_node(node, config=validated)
+                sync_topology(topology, positions)
+                st.success("Node config saved.")
+                st.rerun()
+
+            delete_node = edit_node
             if st.button("Delete selected node"):
                 topology.remove_node(delete_node)
                 positions.pop(delete_node, None)
@@ -449,7 +656,7 @@ def render_topology_designer_tab() -> None:
                 sync_topology(topology, positions)
                 st.rerun()
 
-        st.markdown("#### Connect with PCIe / link")
+        st.markdown("#### Connect link")
         if len(topology.nodes) >= 2:
             node_ids = list(topology.nodes.keys())
             source = st.selectbox(
@@ -468,27 +675,60 @@ def render_topology_designer_tab() -> None:
             bidirectional = st.checkbox("Bidirectional link", value=True)
             edge_name = st.text_input("Link ID", value=f"{source}_{dest}")
 
-            if st.button("Create connection"):
-                bundle = get_bundle()
-                default_pcie = get_default_pcie_dict()
+            with st.expander("New link parameters (optional)", expanded=False):
                 if interconnect == InterconnectType.PCIE.value:
-                    config = pcie_config_from_dict(default_pcie)
+                    new_link_data = render_pcie_config_form(
+                        get_default_pcie_dict(),
+                        key_prefix="new_link_pcie",
+                        title="PCIe parameters for new link",
+                    )
+                elif interconnect == InterconnectType.NVLINK.value:
+                    nv_presets = list_presets("NVLink")
+                    nv_preset = st.selectbox("NVLink preset", ["(defaults)"] + nv_presets, key="new_nv_preset")
+                    base_nv = (
+                        get_preset("NVLink", nv_preset)
+                        if nv_preset != "(defaults)"
+                        else get_default_nvlink_dict()
+                    )
+                    new_link_data = render_nvlink_config_form(
+                        base_nv,
+                        key_prefix="new_link_nvlink",
+                        title="NVLink parameters for new link",
+                    )
+                else:
+                    ib_presets = list_presets("InfiniBand")
+                    ib_preset = st.selectbox("InfiniBand preset", ["(defaults)"] + ib_presets, key="new_ib_preset")
+                    base_ib = (
+                        get_preset("InfiniBand", ib_preset)
+                        if ib_preset != "(defaults)"
+                        else get_default_infiniband_dict()
+                    )
+                    new_link_data = render_infiniband_config_form(
+                        base_ib,
+                        key_prefix="new_link_ib",
+                        title="InfiniBand parameters for new link",
+                    )
+
+            if st.button("Create connection"):
+                if interconnect == InterconnectType.PCIE.value:
+                    config = pcie_config_from_dict(new_link_data)
                     topology.connect_pcie(edge_name, source, dest, config, bidirectional=bidirectional)
                 elif interconnect == InterconnectType.NVLINK.value:
-                    nvlink = nvlink_config_from_dict(bundle.get("default_nvlink", DEFAULT_NVLINK))
-                    topology.connect_nvlink(edge_name, source, dest, nvlink, bidirectional=bidirectional)
+                    config = nvlink_config_from_dict(new_link_data)
+                    topology.connect_nvlink(edge_name, source, dest, config, bidirectional=bidirectional)
                 else:
-                    ib = infiniband_config_from_dict(bundle.get("default_infiniband", DEFAULT_INFINIBAND))
-                    topology.connect_infiniband(edge_name, source, dest, ib, bidirectional=bidirectional)
+                    config = infiniband_config_from_dict(new_link_data)
+                    topology.connect_infiniband(edge_name, source, dest, config, bidirectional=bidirectional)
                 sync_topology(topology, positions)
                 st.rerun()
         else:
             st.info("Add at least two nodes to create a connection.")
 
         st.markdown("#### Links")
-        if topology.edges:
+        forward_edges = _forward_edges(topology)
+        if forward_edges:
             edge_rows = []
-            for edge in topology.edges.values():
+            for edge in forward_edges:
                 src = topology.nodes.get(edge.source_id)
                 dst = topology.nodes.get(edge.dest_id)
                 edge_rows.append({
@@ -502,14 +742,77 @@ def render_topology_designer_tab() -> None:
                 })
             st.dataframe(pd.DataFrame(edge_rows), use_container_width=True, hide_index=True)
 
-            selected_edge = st.selectbox("Select link to edit / delete", [e.id for e in topology.edges.values()])
-            if st.button("Delete selected link"):
-                topology.remove_edge(selected_edge)
-                rev_id = f"{selected_edge}_rev"
-                if rev_id in topology.edges:
-                    topology.remove_edge(rev_id)
-                sync_topology(topology, positions)
-                st.rerun()
+            selected_edge = st.selectbox(
+                "Select link to edit",
+                [e.id for e in forward_edges],
+                format_func=lambda eid: _edge_label(topology, eid),
+            )
+            edge = topology.edges[selected_edge]
+            bundle = get_bundle()
+            new_interconnect = st.selectbox(
+                "Interconnect type",
+                INTERCONNECT_OPTIONS,
+                index=INTERCONNECT_OPTIONS.index(edge.interconnect_type.value),
+                key=f"edit_link_type_{selected_edge}",
+            )
+
+            if new_interconnect == InterconnectType.PCIE.value:
+                current = bundle["pcie_configs"].get(selected_edge, get_default_pcie_dict())
+                link_data = render_pcie_config_form(
+                    current,
+                    key_prefix=f"edit_pcie_{selected_edge}",
+                    title=f"PCIe — `{_edge_label(topology, selected_edge)}`",
+                )
+            elif new_interconnect == InterconnectType.NVLINK.value:
+                current = bundle["nvlink_configs"].get(selected_edge, get_default_nvlink_dict())
+                link_data = render_nvlink_config_form(
+                    current,
+                    key_prefix=f"edit_nvlink_{selected_edge}",
+                    title=f"NVLink — `{_edge_label(topology, selected_edge)}`",
+                )
+            else:
+                current = bundle["infiniband_configs"].get(selected_edge, get_default_infiniband_dict())
+                link_data = render_infiniband_config_form(
+                    current,
+                    key_prefix=f"edit_ib_{selected_edge}",
+                    title=f"InfiniBand — `{_edge_label(topology, selected_edge)}`",
+                )
+
+            lcol1, lcol2 = st.columns(2)
+            with lcol1:
+                if st.button("Apply link changes", key=f"apply_link_{selected_edge}"):
+                    if new_interconnect == InterconnectType.PCIE.value:
+                        _replace_link(
+                            topology,
+                            selected_edge,
+                            new_interconnect,
+                            pcie_data=link_data,
+                        )
+                    elif new_interconnect == InterconnectType.NVLINK.value:
+                        _replace_link(
+                            topology,
+                            selected_edge,
+                            new_interconnect,
+                            nvlink_data=link_data,
+                        )
+                    else:
+                        _replace_link(
+                            topology,
+                            selected_edge,
+                            new_interconnect,
+                            ib_data=link_data,
+                        )
+                    sync_topology(topology, positions)
+                    st.success("Link updated.")
+                    st.rerun()
+            with lcol2:
+                if st.button("Delete selected link", key=f"delete_link_{selected_edge}"):
+                    topology.remove_edge(selected_edge)
+                    rev_id = f"{selected_edge}_rev"
+                    if rev_id in topology.edges:
+                        topology.remove_edge(rev_id)
+                    sync_topology(topology, positions)
+                    st.rerun()
         else:
             st.info("No links yet.")
 
@@ -535,72 +838,168 @@ def render_topology_designer_tab() -> None:
 def render_interconnect_tab() -> None:
     init_topology_session()
     topology = get_topology()
-    default_pcie = get_default_pcie_dict()
+    forward_edges = _forward_edges(topology)
 
-    st.markdown("### Interconnect / PCIe Configuration")
+    st.markdown("### Interconnect Configuration")
     st.caption(
-        "Configure default PCIe parameters for **new links**. "
-        "Per-link overrides are applied on the selected link below."
+        "Set defaults for **new links** and apply per-link overrides for PCIe, NVLink, and InfiniBand."
     )
 
-    updated_default = render_pcie_config_form(default_pcie, key_prefix="default_pcie", title="Default PCIe parameters")
-    if st.button("Save as default for new links"):
-        set_default_pcie_dict(updated_default)
-        st.success("Default PCIe configuration saved.")
+    interconnect_kind = st.radio(
+        "Interconnect family",
+        INTERCONNECT_OPTIONS,
+        horizontal=True,
+        key="interconnect_family",
+    )
 
     st.divider()
-    st.markdown("#### Per-link PCIe overrides")
 
-    pcie_edges = [
-        e for e in topology.edges.values()
-        if e.interconnect_type == InterconnectType.PCIE and not e.id.endswith("_rev")
-    ]
-    if not pcie_edges:
-        st.info("No PCIe links in the current topology. Create links in the Topology Designer tab.")
-        return
+    if interconnect_kind == InterconnectType.PCIE.value:
+        st.markdown("#### Default PCIe (new links)")
+        updated_default = render_pcie_config_form(
+            get_default_pcie_dict(),
+            key_prefix="default_pcie",
+            title="Default PCIe parameters",
+        )
+        if st.button("Save default PCIe"):
+            set_default_pcie_dict(updated_default)
+            st.success("Default PCIe saved.")
 
-    edge = st.selectbox(
-        "PCIe link",
-        [e.id for e in pcie_edges],
-        format_func=lambda eid: _edge_label(topology, eid),
-    )
-    bundle = get_bundle()
-    current = bundle["pcie_configs"].get(edge, updated_default)
-    per_link = render_pcie_config_form(
-        current,
-        key_prefix=f"edge_{edge}",
-        title=f"Parameters for `{_edge_label(topology, edge)}`",
-    )
+        st.markdown("#### Per-link PCIe overrides")
+        pcie_edges = [e for e in forward_edges if e.interconnect_type == InterconnectType.PCIE]
+        if not pcie_edges:
+            st.info("No PCIe links in the topology.")
+        else:
+            edge = st.selectbox(
+                "PCIe link",
+                [e.id for e in pcie_edges],
+                format_func=lambda eid: _edge_label(topology, eid),
+                key="pcie_edge_select",
+            )
+            bundle = get_bundle()
+            current = bundle["pcie_configs"].get(edge, updated_default)
+            per_link = render_pcie_config_form(
+                current,
+                key_prefix=f"ic_edge_{edge}",
+                title=f"Parameters for `{_edge_label(topology, edge)}`",
+            )
+            if st.button("Apply to selected PCIe link", key="apply_pcie_link"):
+                _replace_link(topology, edge, InterconnectType.PCIE.value, pcie_data=per_link)
+                sync_topology(topology, get_positions())
+                st.success("PCIe link updated.")
+                st.rerun()
 
-    if st.button("Apply to selected link"):
-        config = pcie_config_from_dict(per_link)
-        selected = topology.edges[edge]
-        topology.add_edge(selected, pcie_config=config)
-        rev_id = f"{edge}_rev"
-        if rev_id in topology.edges:
-            topology.add_edge(topology.edges[rev_id], pcie_config=config)
-        sync_topology(topology, get_positions())
-        st.success("Link updated.")
-        st.rerun()
+            rows = []
+            for e in pcie_edges:
+                cfg = topology.pcie_configs.get(e.id)
+                if cfg is None:
+                    continue
+                bw = compute_pcie_bandwidth(cfg)
+                rows.append({
+                    "Link": _edge_label(topology, e.id),
+                    "RAW / PROTO / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.protocol_GBps:.1f} / {bw.effective_GBps:.1f}",
+                    "Switch hops": cfg.switch_hops,
+                })
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    st.markdown("#### All PCIe links — bandwidth summary")
-    rows = []
-    for e in pcie_edges:
-        cfg = topology.pcie_configs.get(e.id)
-        if cfg is None:
-            continue
-        bw = compute_pcie_bandwidth(cfg)
-        rows.append({
-            "Link": _edge_label(topology, e.id),
-            "Generation": cfg.generation.value,
-            "Width": cfg.width.value,
-            "RAW (GB/s)": f"{bw.raw_GBps:.2f}",
-            "PROTOCOL (GB/s)": f"{bw.protocol_GBps:.2f}",
-            "EFFECTIVE (GB/s)": f"{bw.effective_GBps:.2f}",
-            "Switch hops": cfg.switch_hops,
-            "MPS / MRRS": f"{cfg.mps.value} / {cfg.mrrs.value}",
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    elif interconnect_kind == InterconnectType.NVLINK.value:
+        st.markdown("#### Default NVLink (new links)")
+        updated_default = render_nvlink_config_form(
+            get_default_nvlink_dict(),
+            key_prefix="default_nvlink",
+            title="Default NVLink parameters",
+        )
+        if st.button("Save default NVLink"):
+            set_default_nvlink_dict(updated_default)
+            st.success("Default NVLink saved.")
+
+        st.markdown("#### Per-link NVLink overrides")
+        nvlink_edges = [e for e in forward_edges if e.interconnect_type == InterconnectType.NVLINK]
+        if not nvlink_edges:
+            st.info("No NVLink links in the topology.")
+        else:
+            edge = st.selectbox(
+                "NVLink link",
+                [e.id for e in nvlink_edges],
+                format_func=lambda eid: _edge_label(topology, eid),
+                key="nvlink_edge_select",
+            )
+            bundle = get_bundle()
+            current = bundle["nvlink_configs"].get(edge, updated_default)
+            per_link = render_nvlink_config_form(
+                current,
+                key_prefix=f"ic_nvlink_{edge}",
+                title=f"Parameters for `{_edge_label(topology, edge)}`",
+            )
+            if st.button("Apply to selected NVLink link", key="apply_nvlink_link"):
+                _replace_link(topology, edge, InterconnectType.NVLINK.value, nvlink_data=per_link)
+                sync_topology(topology, get_positions())
+                st.success("NVLink link updated.")
+                st.rerun()
+
+            rows = []
+            for e in nvlink_edges:
+                cfg = topology.nvlink_configs.get(e.id)
+                if cfg is None:
+                    continue
+                bw = compute_nvlink_bandwidth(cfg)
+                rows.append({
+                    "Link": _edge_label(topology, e.id),
+                    "RAW / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.effective_GBps:.1f}",
+                    "Links": cfg.links,
+                })
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    else:
+        st.markdown("#### Default InfiniBand (new links)")
+        updated_default = render_infiniband_config_form(
+            get_default_infiniband_dict(),
+            key_prefix="default_infiniband",
+            title="Default InfiniBand parameters",
+        )
+        if st.button("Save default InfiniBand"):
+            set_default_infiniband_dict(updated_default)
+            st.success("Default InfiniBand saved.")
+
+        st.markdown("#### Per-link InfiniBand overrides")
+        ib_edges = [e for e in forward_edges if e.interconnect_type == InterconnectType.INFINIBAND]
+        if not ib_edges:
+            st.info("No InfiniBand links in the topology.")
+        else:
+            edge = st.selectbox(
+                "InfiniBand link",
+                [e.id for e in ib_edges],
+                format_func=lambda eid: _edge_label(topology, eid),
+                key="ib_edge_select",
+            )
+            bundle = get_bundle()
+            current = bundle["infiniband_configs"].get(edge, updated_default)
+            per_link = render_infiniband_config_form(
+                current,
+                key_prefix=f"ic_ib_{edge}",
+                title=f"Parameters for `{_edge_label(topology, edge)}`",
+            )
+            if st.button("Apply to selected InfiniBand link", key="apply_ib_link"):
+                _replace_link(topology, edge, InterconnectType.INFINIBAND.value, ib_data=per_link)
+                sync_topology(topology, get_positions())
+                st.success("InfiniBand link updated.")
+                st.rerun()
+
+            rows = []
+            for e in ib_edges:
+                cfg = topology.infiniband_configs.get(e.id)
+                if cfg is None:
+                    continue
+                bw = compute_infiniband_bandwidth(cfg)
+                rows.append({
+                    "Link": _edge_label(topology, e.id),
+                    "RAW / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.effective_GBps:.1f}",
+                    "RDMA": cfg.rdma_enabled,
+                })
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def _edge_label(topology: Topology, edge_id: str) -> str:
@@ -715,34 +1114,34 @@ def render_path_inspector_tab() -> None:
             hop_rows.append({
                 "Hop": _edge_label(topology, edge.id),
                 "Type": edge.interconnect_type.value,
+                "Config source": "PCIe link config",
                 "RAW / PROTO / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.protocol_GBps:.1f} / {bw.effective_GBps:.1f}",
                 "Transfer (µs)": f"{lat.transfer_time_us:.2f}",
                 "Serialization (µs)": f"{lat.serialization_time_us:.2f}",
                 "Switch hops": cfg.switch_hops,
             })
         elif nvlink_cfg is not None:
-            from model.interconnect.nvlink import compute_nvlink_bandwidth, compute_nvlink_transfer_time_us
+            from model.interconnect.nvlink import compute_nvlink_transfer_time_us
 
             lat = compute_nvlink_transfer_time_us(nvlink_cfg, payload_bytes)
             bw = compute_nvlink_bandwidth(nvlink_cfg)
             hop_rows.append({
                 "Hop": _edge_label(topology, edge.id),
                 "Type": edge.interconnect_type.value,
+                "Config source": "NVLink link config",
                 "RAW / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.effective_GBps:.1f}",
                 "Transfer (µs)": f"{lat.transfer_time_us:.2f}",
                 "Serialization (µs)": f"{lat.serialization_time_us:.2f}",
             })
         elif ib_cfg is not None:
-            from model.interconnect.infiniband import (
-                compute_infiniband_bandwidth,
-                compute_infiniband_transfer_time_us,
-            )
+            from model.interconnect.infiniband import compute_infiniband_transfer_time_us
 
             lat = compute_infiniband_transfer_time_us(ib_cfg, payload_bytes)
             bw = compute_infiniband_bandwidth(ib_cfg)
             hop_rows.append({
                 "Hop": _edge_label(topology, edge.id),
                 "Type": edge.interconnect_type.value,
+                "Config source": "InfiniBand link config",
                 "RAW / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.effective_GBps:.1f}",
                 "Transfer (µs)": f"{lat.transfer_time_us:.2f}",
                 "Serialization (µs)": f"{lat.serialization_time_us:.2f}",
@@ -885,7 +1284,7 @@ def render_dma_tlp_flit_tab() -> None:
 def render_topology_section() -> None:
     tab_topo, tab_pcie, tab_path, tab_dma = st.tabs([
         "Topology Designer",
-        "Interconnect / PCIe",
+        "Interconnect",
         "Path Inspector",
         "DMA / TLP / FLIT",
     ])
@@ -907,7 +1306,7 @@ def main() -> None:
     )
     st.title("Topology & PCIe Designer")
     st.caption(
-        "Design system topologies, configure PCIe links, and inspect transfer paths. "
+        "Design system topologies, configure interconnect links, and inspect transfer paths. "
         "All bandwidth/latency values are analytical estimates."
     )
     render_topology_section()

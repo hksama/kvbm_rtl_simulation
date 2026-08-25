@@ -8,21 +8,16 @@ from typing import Any
 
 
 class NodeType(str, Enum):
-    """System component types; extensible for future node kinds."""
+    """System component types (no internal sub-modeling)."""
 
     CPU = "CPU"
     GPU = "GPU"
     FPGA = "FPGA"
     PREFILL_POOL = "PREFILL_POOL"
     DECODE_POOL = "DECODE_POOL"
-    ROUTER = "ROUTER"
-    KVBM_ENGINE = "KVBM_ENGINE"
-    MEMORY = "MEMORY"
-    PCIE_ROOT_COMPLEX = "PCIe_ROOT_COMPLEX"
-    PCIE_SWITCH = "PCIe_SWITCH"
-    NETWORK_SWITCH = "NETWORK_SWITCH"
-    NVSWITCH = "NVSWITCH"
-    NIC = "NIC"
+    HBM_MEMORY = "HBM_MEMORY"
+    PCIE_ROOT_COMPLEX = "PCIE_ROOT_COMPLEX"
+    PCIE_SWITCH = "PCIE_SWITCH"
 
 
 class InterconnectType(str, Enum):
@@ -30,12 +25,16 @@ class InterconnectType(str, Enum):
 
     PCIE = "PCIe"
     NVLINK = "NVLink"
-    NVSWITCH = "NVSwitch"
-    ETHERNET = "Ethernet"
     INFINIBAND = "InfiniBand"
-    ROCE = "RoCE"
-    CXL = "CXL"
-    GENERIC = "Generic"
+
+
+NODE_TYPE_ALIASES: dict[str, str] = {
+    "MEMORY": NodeType.HBM_MEMORY.value,
+}
+
+
+def normalize_node_type(value: str) -> str:
+    return NODE_TYPE_ALIASES.get(value, value)
 
 
 @dataclass
@@ -110,6 +109,9 @@ class PathSummary:
     utilization: float = 0.0
     bandwidth_label: str = "EFFECTIVE"
     latency_label: str = "ANALYTICAL ESTIMATE"
+    node_hop_latency_us: float = 0.0
+    memory_service_latency_us: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -124,4 +126,7 @@ class PathSummary:
             "utilization": self.utilization,
             "bandwidth_label": self.bandwidth_label,
             "latency_label": self.latency_label,
+            "node_hop_latency_us": self.node_hop_latency_us,
+            "memory_service_latency_us": self.memory_service_latency_us,
+            "metadata": dict(self.metadata),
         }

@@ -7,11 +7,16 @@ from typing import Any
 
 import streamlit as st
 
+from model.interconnect.infiniband import infiniband_config_from_dict, infiniband_config_to_dict
+from model.interconnect.nvlink import nvlink_config_from_dict, nvlink_config_to_dict
 from model.interconnect.pcie import PCIeConfig
 from model.topology import Edge, InterconnectType, Node, NodeType, Topology
 from model.topology.io import (
     DEFAULT_DMA,
+    DEFAULT_INFINIBAND,
+    DEFAULT_NVLINK,
     DEFAULT_PCIE,
+    SCHEMA_VERSION,
     dump_topology_yaml_text,
     load_topology_yaml,
     load_topology_yaml_text,
@@ -34,6 +39,14 @@ def _default_pcie_dict() -> dict[str, Any]:
 
 def _default_dma_dict() -> dict[str, Any]:
     return dict(DEFAULT_DMA)
+
+
+def _default_nvlink_dict() -> dict[str, Any]:
+    return dict(DEFAULT_NVLINK)
+
+
+def _default_infiniband_dict() -> dict[str, Any]:
+    return dict(DEFAULT_INFINIBAND)
 
 
 def _node_to_dict(node: Node) -> dict[str, Any]:
@@ -90,16 +103,30 @@ def _edge_from_dict(data: dict[str, Any]) -> Edge:
 
 def bundle_to_topology(bundle: dict[str, Any]) -> Topology:
     topology = Topology()
+    node_configs = bundle.get("node_configs", {})
     for node_data in bundle.get("nodes", []):
-        topology.add_node(_node_from_dict(node_data))
+        config = node_configs.get(node_data["id"])
+        topology.add_node(_node_from_dict(node_data), config=config)
     pcie_lookup = {
         edge_id: pcie_config_from_dict(cfg)
         for edge_id, cfg in bundle.get("pcie_configs", {}).items()
     }
+    nvlink_lookup = {
+        edge_id: nvlink_config_from_dict(cfg)
+        for edge_id, cfg in bundle.get("nvlink_configs", {}).items()
+    }
+    ib_lookup = {
+        edge_id: infiniband_config_from_dict(cfg)
+        for edge_id, cfg in bundle.get("infiniband_configs", {}).items()
+    }
     for edge_data in bundle.get("edges", []):
         edge = _edge_from_dict(edge_data)
-        pcie = pcie_lookup.get(edge.id)
-        topology.add_edge(edge, pcie_config=pcie)
+        topology.add_edge(
+            edge,
+            pcie_config=pcie_lookup.get(edge.id),
+            nvlink_config=nvlink_lookup.get(edge.id),
+            infiniband_config=ib_lookup.get(edge.id),
+        )
     return topology
 
 
@@ -108,17 +135,35 @@ def topology_to_bundle(
     positions: dict[str, tuple[float, float]],
     default_pcie: dict[str, Any],
     default_dma: dict[str, Any] | None = None,
+    *,
+    schema_version: int = SCHEMA_VERSION,
+    default_nvlink: dict[str, Any] | None = None,
+    default_infiniband: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
+        "schema_version": schema_version,
         "nodes": [_node_to_dict(n) for n in topology.nodes.values()],
         "edges": [_edge_to_dict(e) for e in topology.edges.values()],
         "pcie_configs": {
             edge_id: pcie_config_to_dict(cfg)
             for edge_id, cfg in topology.pcie_configs.items()
         },
+        "nvlink_configs": {
+            edge_id: nvlink_config_to_dict(cfg)
+            for edge_id, cfg in topology.nvlink_configs.items()
+        },
+        "infiniband_configs": {
+            edge_id: infiniband_config_to_dict(cfg)
+            for edge_id, cfg in topology.infiniband_configs.items()
+        },
+        "node_configs": {
+            node_id: dict(cfg) for node_id, cfg in topology.node_configs.items()
+        },
         "positions": {node_id: list(pos) for node_id, pos in positions.items()},
         "default_pcie": default_pcie,
         "default_dma": default_dma or _default_dma_dict(),
+        "default_nvlink": default_nvlink or _default_nvlink_dict(),
+        "default_infiniband": default_infiniband or _default_infiniband_dict(),
     }
 
 
@@ -194,12 +239,16 @@ def export_topology_yaml_text() -> str:
 
 
 def sync_topology(topology: Topology, positions: dict[str, tuple[float, float]]) -> None:
+    bundle = get_bundle()
     save_bundle(
         topology_to_bundle(
             topology,
             positions,
             get_default_pcie_dict(),
             get_default_dma_dict(),
+            schema_version=int(bundle.get("schema_version", SCHEMA_VERSION)),
+            default_nvlink=dict(bundle.get("default_nvlink", _default_nvlink_dict())),
+            default_infiniband=dict(bundle.get("default_infiniband", _default_infiniband_dict())),
         )
     )
 

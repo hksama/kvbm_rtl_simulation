@@ -49,11 +49,17 @@ from ui.topology_state import (
     set_default_pcie_dict,
     sync_topology,
 )
-from model.topology.io import TopologyFormatError
+from model.interconnect.infiniband import infiniband_config_from_dict
+from model.interconnect.nvlink import nvlink_config_from_dict
+from model.topology.io import DEFAULT_INFINIBAND, DEFAULT_NVLINK, TopologyFormatError
 
 
 NODE_TYPE_OPTIONS = {t.value: t for t in NodeType}
-INTERCONNECT_OPTIONS = [InterconnectType.PCIE.value, InterconnectType.GENERIC.value]
+INTERCONNECT_OPTIONS = [
+    InterconnectType.PCIE.value,
+    InterconnectType.NVLINK.value,
+    InterconnectType.INFINIBAND.value,
+]
 GEN_OPTIONS = [g.value for g in PCIeGeneration]
 WIDTH_OPTIONS = [w.value for w in PCIeWidth]
 MPS_OPTIONS = [m.value for m in PCIeMPS]
@@ -63,14 +69,11 @@ NODE_COLORS = {
     NodeType.CPU.value: "#636EFA",
     NodeType.GPU.value: "#00CC96",
     NodeType.FPGA.value: "#EF553B",
-    NodeType.KVBM_ENGINE.value: "#AB63FA",
     NodeType.PREFILL_POOL.value: "#19D3F3",
     NodeType.DECODE_POOL.value: "#FF6692",
+    NodeType.HBM_MEMORY.value: "#C4B5A0",
     NodeType.PCIE_ROOT_COMPLEX.value: "#FECB52",
     NodeType.PCIE_SWITCH.value: "#B6E880",
-    NodeType.ROUTER.value: "#FF97FF",
-    NodeType.MEMORY.value: "#C4B5A0",
-    NodeType.NVSWITCH.value: "#76D7C4",
 }
 
 
@@ -466,23 +469,17 @@ def render_topology_designer_tab() -> None:
             edge_name = st.text_input("Link ID", value=f"{source}_{dest}")
 
             if st.button("Create connection"):
+                bundle = get_bundle()
                 default_pcie = get_default_pcie_dict()
                 if interconnect == InterconnectType.PCIE.value:
                     config = pcie_config_from_dict(default_pcie)
                     topology.connect_pcie(edge_name, source, dest, config, bidirectional=bidirectional)
+                elif interconnect == InterconnectType.NVLINK.value:
+                    nvlink = nvlink_config_from_dict(bundle.get("default_nvlink", DEFAULT_NVLINK))
+                    topology.connect_nvlink(edge_name, source, dest, nvlink, bidirectional=bidirectional)
                 else:
-                    config = pcie_config_from_dict(default_pcie)
-                    bw = compute_pcie_bandwidth(config).effective_GBps
-                    topology.add_edge(
-                        Edge(
-                            id=edge_name,
-                            source_id=source,
-                            dest_id=dest,
-                            interconnect_type=InterconnectType.GENERIC,
-                            bandwidth_GBps=bw,
-                            latency_us=config.base_latency_us,
-                        )
-                    )
+                    ib = infiniband_config_from_dict(bundle.get("default_infiniband", DEFAULT_INFINIBAND))
+                    topology.connect_infiniband(edge_name, source, dest, ib, bidirectional=bidirectional)
                 sync_topology(topology, positions)
                 st.rerun()
         else:
@@ -619,7 +616,7 @@ def render_path_inspector_tab() -> None:
     positions = get_positions()
 
     st.markdown("### Path Inspector")
-    st.caption("Select source and destination to analyze PCIe path latency and bandwidth.")
+    st.caption("Select source and destination to analyze path latency and EFFECTIVE bandwidth.")
 
     if len(topology.nodes) < 2:
         st.warning("Add at least two nodes in the Topology Designer.")
@@ -692,30 +689,72 @@ def render_path_inspector_tab() -> None:
     with m7:
         st.metric("Congestion penalty", f"{summary.congestion_penalty_us:.2f} µs")
 
-    st.markdown("#### Per-hop PCIe detail")
+    if summary.node_hop_latency_us > 0 or summary.memory_service_latency_us > 0:
+        n1, n2 = st.columns(2)
+        with n1:
+            st.metric("RC / switch hop latency", f"{summary.node_hop_latency_us:.2f} µs")
+        with n2:
+            st.metric("HBM service latency", f"{summary.memory_service_latency_us:.2f} µs")
+
+    if summary.metadata.get("pools"):
+        st.markdown("#### Pool metadata (ASSUMPTION)")
+        st.dataframe(pd.DataFrame(summary.metadata["pools"]), use_container_width=True, hide_index=True)
+
+    st.markdown("#### Per-hop detail")
     hop_rows = []
     for edge in path.edges:
         cfg = topology.pcie_configs.get(edge.id)
-        if cfg is None:
+        nvlink_cfg = topology.nvlink_configs.get(edge.id)
+        ib_cfg = topology.infiniband_configs.get(edge.id)
+        if cfg is not None:
+            if is_read:
+                lat = compute_read_latency_us(cfg, payload_bytes)
+            else:
+                lat = compute_write_latency_us(cfg, payload_bytes)
+            bw = compute_pcie_bandwidth(cfg)
+            hop_rows.append({
+                "Hop": _edge_label(topology, edge.id),
+                "Type": edge.interconnect_type.value,
+                "RAW / PROTO / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.protocol_GBps:.1f} / {bw.effective_GBps:.1f}",
+                "Transfer (µs)": f"{lat.transfer_time_us:.2f}",
+                "Serialization (µs)": f"{lat.serialization_time_us:.2f}",
+                "Switch hops": cfg.switch_hops,
+            })
+        elif nvlink_cfg is not None:
+            from model.interconnect.nvlink import compute_nvlink_bandwidth, compute_nvlink_transfer_time_us
+
+            lat = compute_nvlink_transfer_time_us(nvlink_cfg, payload_bytes)
+            bw = compute_nvlink_bandwidth(nvlink_cfg)
+            hop_rows.append({
+                "Hop": _edge_label(topology, edge.id),
+                "Type": edge.interconnect_type.value,
+                "RAW / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.effective_GBps:.1f}",
+                "Transfer (µs)": f"{lat.transfer_time_us:.2f}",
+                "Serialization (µs)": f"{lat.serialization_time_us:.2f}",
+            })
+        elif ib_cfg is not None:
+            from model.interconnect.infiniband import (
+                compute_infiniband_bandwidth,
+                compute_infiniband_transfer_time_us,
+            )
+
+            lat = compute_infiniband_transfer_time_us(ib_cfg, payload_bytes)
+            bw = compute_infiniband_bandwidth(ib_cfg)
+            hop_rows.append({
+                "Hop": _edge_label(topology, edge.id),
+                "Type": edge.interconnect_type.value,
+                "RAW / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.effective_GBps:.1f}",
+                "Transfer (µs)": f"{lat.transfer_time_us:.2f}",
+                "Serialization (µs)": f"{lat.serialization_time_us:.2f}",
+                "RDMA": ib_cfg.rdma_enabled,
+            })
+        else:
             hop_rows.append({
                 "Hop": _edge_label(topology, edge.id),
                 "Type": edge.interconnect_type.value,
                 "Effective BW": f"{edge.bandwidth_GBps:.2f} GB/s",
                 "Latency": f"{edge.latency_us:.2f} µs",
             })
-            continue
-        if is_read:
-            lat = compute_read_latency_us(cfg, payload_bytes)
-        else:
-            lat = compute_write_latency_us(cfg, payload_bytes)
-        bw = compute_pcie_bandwidth(cfg)
-        hop_rows.append({
-            "Hop": _edge_label(topology, edge.id),
-            "RAW / PROTO / EFF (GB/s)": f"{bw.raw_GBps:.1f} / {bw.protocol_GBps:.1f} / {bw.effective_GBps:.1f}",
-            "Transfer (µs)": f"{lat.transfer_time_us:.2f}",
-            "Serialization (µs)": f"{lat.serialization_time_us:.2f}",
-            "Switch hops": cfg.switch_hops,
-        })
     st.dataframe(pd.DataFrame(hop_rows), use_container_width=True, hide_index=True)
 
 

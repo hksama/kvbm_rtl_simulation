@@ -4,6 +4,19 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
+from model.interconnect.infiniband import (
+    InfiniBandConfig,
+    compute_infiniband_transfer_time_us,
+    effective_infiniband_bandwidth_gbps,
+    infiniband_config_to_dict,
+)
+from model.interconnect.nvlink import (
+    NVLinkConfig,
+    compute_nvlink_transfer_time_us,
+    effective_nvlink_bandwidth_gbps,
+    nvlink_config_to_dict,
+)
 from model.interconnect.pcie import (
     PCIeConfig,
     compute_effective_bandwidth_gbps,
@@ -37,19 +50,34 @@ class Topology:
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: dict[str, Edge] = field(default_factory=dict)
     pcie_configs: dict[str, PCIeConfig] = field(default_factory=dict)
+    nvlink_configs: dict[str, NVLinkConfig] = field(default_factory=dict)
+    infiniband_configs: dict[str, InfiniBandConfig] = field(default_factory=dict)
+    node_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    def add_node(self, node: Node) -> None:
+    def add_node(self, node: Node, *, config: dict[str, Any] | None = None) -> None:
         self.nodes[node.id] = node
+        if config is not None:
+            self.node_configs[node.id] = dict(config)
+            node.metadata["config"] = dict(config)
 
     def remove_node(self, node_id: str) -> None:
         self.nodes.pop(node_id, None)
-        to_remove = [edge_id for edge_id, edge in self.edges.items()
-                     if edge.source_id == node_id or edge.dest_id == node_id]
+        self.node_configs.pop(node_id, None)
+        to_remove = [
+            edge_id for edge_id, edge in self.edges.items()
+            if edge.source_id == node_id or edge.dest_id == node_id
+        ]
         for edge_id in to_remove:
             self.remove_edge(edge_id)
-        self.pcie_configs.pop(node_id, None)
 
-    def add_edge(self, edge: Edge, *, pcie_config: PCIeConfig | None = None) -> None:
+    def add_edge(
+        self,
+        edge: Edge,
+        *,
+        pcie_config: PCIeConfig | None = None,
+        nvlink_config: NVLinkConfig | None = None,
+        infiniband_config: InfiniBandConfig | None = None,
+    ) -> None:
         if edge.interconnect_type == InterconnectType.PCIE and pcie_config is not None:
             self.pcie_configs[edge.id] = pcie_config
             bandwidth = compute_effective_bandwidth_gbps(pcie_config)
@@ -67,11 +95,45 @@ class Topology:
                 enabled=edge.enabled,
                 metadata=dict(edge.metadata),
             )
+        elif edge.interconnect_type == InterconnectType.NVLINK and nvlink_config is not None:
+            self.nvlink_configs[edge.id] = nvlink_config
+            edge = Edge(
+                id=edge.id,
+                source_id=edge.source_id,
+                dest_id=edge.dest_id,
+                interconnect_type=edge.interconnect_type,
+                bandwidth_GBps=effective_nvlink_bandwidth_gbps(nvlink_config),
+                latency_us=nvlink_config.latency_us,
+                width=f"x{nvlink_config.links}",
+                generation=nvlink_config.version,
+                serialization_enabled=edge.serialization_enabled,
+                congestion_factor=edge.congestion_factor,
+                enabled=edge.enabled,
+                metadata=dict(edge.metadata),
+            )
+        elif edge.interconnect_type == InterconnectType.INFINIBAND and infiniband_config is not None:
+            self.infiniband_configs[edge.id] = infiniband_config
+            edge = Edge(
+                id=edge.id,
+                source_id=edge.source_id,
+                dest_id=edge.dest_id,
+                interconnect_type=edge.interconnect_type,
+                bandwidth_GBps=effective_infiniband_bandwidth_gbps(infiniband_config),
+                latency_us=infiniband_config.latency_us,
+                width=f"x{infiniband_config.lanes}",
+                generation=infiniband_config.generation,
+                serialization_enabled=edge.serialization_enabled,
+                congestion_factor=edge.congestion_factor,
+                enabled=edge.enabled,
+                metadata=dict(edge.metadata),
+            )
         self.edges[edge.id] = edge
 
     def remove_edge(self, edge_id: str) -> None:
         self.edges.pop(edge_id, None)
         self.pcie_configs.pop(edge_id, None)
+        self.nvlink_configs.pop(edge_id, None)
+        self.infiniband_configs.pop(edge_id, None)
 
     def get_node(self, node_id: str) -> Node | None:
         return self.nodes.get(node_id)
@@ -144,6 +206,59 @@ class Topology:
             return float("inf")
         return min(edge.bandwidth_GBps for edge in path.edges)
 
+    def _intermediate_node_hop_latency_us(self, path: Path) -> float:
+        """Additive RC / switch traversal latency for intermediate topology nodes."""
+        if len(path.nodes) <= 2:
+            return 0.0
+        total = 0.0
+        for node in path.nodes[1:-1]:
+            config = self.node_configs.get(node.id, {})
+            if node.type == NodeType.PCIE_ROOT_COMPLEX:
+                total += float(config.get("hop_latency_us", 0.2))
+            elif node.type == NodeType.PCIE_SWITCH:
+                total += float(config.get("hop_latency_us", 0.15))
+        return total
+
+    def _destination_memory_service_latency_us(self, path: Path, *, is_read: bool) -> float:
+        """Optional HBM service latency when the path ends at an HBM memory node."""
+        if not path.nodes:
+            return 0.0
+        dest = path.nodes[-1]
+        if dest.type != NodeType.HBM_MEMORY:
+            return 0.0
+        config = self.node_configs.get(dest.id, {})
+        if is_read:
+            return float(config.get("read_latency_ns", 100.0)) / 1000.0
+        return float(config.get("write_latency_ns", 100.0)) / 1000.0
+
+    def _path_metadata(self, path: Path) -> dict[str, Any]:
+        """Expose pool workload rates and endpoint types for display / future use."""
+        metadata: dict[str, Any] = {}
+        pools: list[dict[str, Any]] = []
+        for node in path.nodes:
+            config = self.node_configs.get(node.id)
+            if not config:
+                continue
+            if node.type == NodeType.PREFILL_POOL:
+                pools.append({
+                    "node_id": node.id,
+                    "role": "prefill",
+                    "worker_count": config.get("worker_count"),
+                    "workload_rate_rps": config.get("workload_rate_rps"),
+                    "metadata_ops_rate": config.get("metadata_ops_rate"),
+                })
+            elif node.type == NodeType.DECODE_POOL:
+                pools.append({
+                    "node_id": node.id,
+                    "role": "decode",
+                    "worker_count": config.get("worker_count"),
+                    "workload_rate_rps": config.get("workload_rate_rps"),
+                    "metadata_ops_rate": config.get("metadata_ops_rate"),
+                })
+        if pools:
+            metadata["pools"] = pools
+        return metadata
+
     def _edge_transfer_time_us(
         self,
         edge: Edge,
@@ -157,6 +272,24 @@ class Topology:
                 result = compute_read_latency_us(pcie_config, message_size)
             else:
                 result = compute_write_latency_us(pcie_config, message_size)
+            return (
+                result.transfer_time_us,
+                result.serialization_time_us,
+                result.congestion_penalty_us,
+            )
+
+        nvlink_config = self.nvlink_configs.get(edge.id)
+        if edge.interconnect_type == InterconnectType.NVLINK and nvlink_config is not None:
+            result = compute_nvlink_transfer_time_us(nvlink_config, message_size)
+            return (
+                result.transfer_time_us,
+                result.serialization_time_us,
+                result.congestion_penalty_us,
+            )
+
+        ib_config = self.infiniband_configs.get(edge.id)
+        if edge.interconnect_type == InterconnectType.INFINIBAND and ib_config is not None:
+            result = compute_infiniband_transfer_time_us(ib_config, message_size)
             return (
                 result.transfer_time_us,
                 result.serialization_time_us,
@@ -187,6 +320,8 @@ class Topology:
         for edge in path.edges:
             edge_time, _, _ = self._edge_transfer_time_us(edge, message_size, is_read=is_read)
             total += edge_time
+        total += self._intermediate_node_hop_latency_us(path)
+        total += self._destination_memory_service_latency_us(path, is_read=is_read)
         return total
 
     def transfer_time(self, path: Path, message_size: int, *, is_read: bool = False) -> float:
@@ -215,6 +350,10 @@ class Topology:
             serialization_total += serialization
             congestion_total += congestion
 
+        node_hop_latency = self._intermediate_node_hop_latency_us(path)
+        memory_service_latency = self._destination_memory_service_latency_us(path, is_read=is_read)
+        fixed_total += node_hop_latency + memory_service_latency
+
         transfer_time = fixed_total + serialization_total
         utilization = 0.0
         if bottleneck > 0 and offered_bandwidth_gbps > 0:
@@ -232,6 +371,9 @@ class Topology:
             utilization=min(utilization, 1.0),
             bandwidth_label="EFFECTIVE",
             latency_label="ANALYTICAL ESTIMATE",
+            node_hop_latency_us=node_hop_latency,
+            memory_service_latency_us=memory_service_latency,
+            metadata=self._path_metadata(path),
         )
 
     def connect_pcie(
@@ -272,6 +414,84 @@ class Topology:
                     congestion_factor=config.congestion_factor,
                 ),
                 pcie_config=config,
+            )
+
+    def connect_nvlink(
+        self,
+        edge_id: str,
+        source_id: str,
+        dest_id: str,
+        config: NVLinkConfig,
+        *,
+        bidirectional: bool = True,
+    ) -> None:
+        self.add_edge(
+            Edge(
+                id=edge_id,
+                source_id=source_id,
+                dest_id=dest_id,
+                interconnect_type=InterconnectType.NVLINK,
+                bandwidth_GBps=0.0,
+                latency_us=config.latency_us,
+                width=f"x{config.links}",
+                generation=config.version,
+                congestion_factor=config.congestion_factor,
+            ),
+            nvlink_config=config,
+        )
+        if bidirectional:
+            self.add_edge(
+                Edge(
+                    id=f"{edge_id}_rev",
+                    source_id=dest_id,
+                    dest_id=source_id,
+                    interconnect_type=InterconnectType.NVLINK,
+                    bandwidth_GBps=0.0,
+                    latency_us=config.latency_us,
+                    width=f"x{config.links}",
+                    generation=config.version,
+                    congestion_factor=config.congestion_factor,
+                ),
+                nvlink_config=config,
+            )
+
+    def connect_infiniband(
+        self,
+        edge_id: str,
+        source_id: str,
+        dest_id: str,
+        config: InfiniBandConfig,
+        *,
+        bidirectional: bool = True,
+    ) -> None:
+        self.add_edge(
+            Edge(
+                id=edge_id,
+                source_id=source_id,
+                dest_id=dest_id,
+                interconnect_type=InterconnectType.INFINIBAND,
+                bandwidth_GBps=0.0,
+                latency_us=config.latency_us,
+                width=f"x{config.lanes}",
+                generation=config.generation,
+                congestion_factor=config.congestion_factor,
+            ),
+            infiniband_config=config,
+        )
+        if bidirectional:
+            self.add_edge(
+                Edge(
+                    id=f"{edge_id}_rev",
+                    source_id=dest_id,
+                    dest_id=source_id,
+                    interconnect_type=InterconnectType.INFINIBAND,
+                    bandwidth_GBps=0.0,
+                    latency_us=config.latency_us,
+                    width=f"x{config.lanes}",
+                    generation=config.generation,
+                    congestion_factor=config.congestion_factor,
+                ),
+                infiniband_config=config,
             )
 
 

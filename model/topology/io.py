@@ -15,12 +15,25 @@ from typing import Any
 
 import yaml
 
+from model.interconnect.infiniband import (
+    DEFAULT_INFINIBAND,
+    InfiniBandConfig,
+    infiniband_config_from_dict,
+    infiniband_config_to_dict,
+)
+from model.interconnect.nvlink import (
+    DEFAULT_NVLINK,
+    NVLinkConfig,
+    nvlink_config_from_dict,
+    nvlink_config_to_dict,
+)
 from model.interconnect.pcie import PCIeConfig, PCIeGeneration, PCIeMPS, PCIeMRRS, PCIeWidth
 from model.interconnect.pcie import compute_effective_bandwidth_gbps
 from model.topology.graph import Topology
-from model.topology.types import Edge, InterconnectType, Node, NodeType
+from model.topology.types import Edge, InterconnectType, Node, NodeType, normalize_node_type
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = {1, 2}
 
 DEFAULT_PCIE: dict[str, Any] = {
     "generation": PCIeGeneration.GEN4.value,
@@ -53,6 +66,12 @@ class TopologyFormatError(ValueError):
     """Raised when a topology document is invalid."""
 
 
+def _registry():
+    from model.components.registry import attach_node_config, default_node_config_dict
+
+    return attach_node_config, default_node_config_dict
+
+
 @dataclass
 class TopologyDocument:
     """Parsed topology document."""
@@ -62,6 +81,8 @@ class TopologyDocument:
     description: str
     default_pcie: dict[str, Any]
     default_dma: dict[str, Any]
+    default_nvlink: dict[str, Any]
+    default_infiniband: dict[str, Any]
     nodes: list[dict[str, Any]]
     links: list[dict[str, Any]]
 
@@ -123,11 +144,14 @@ def _parse_position(raw: Any) -> tuple[float, float]:
 
 
 def _validate_node_type(value: str) -> str:
+    normalized = normalize_node_type(value)
     try:
-        return NodeType(value).value
+        return NodeType(normalized).value
     except ValueError as exc:
         valid = ", ".join(t.value for t in NodeType)
-        raise TopologyFormatError(f"Unknown node type '{value}'. Valid types: {valid}") from exc
+        raise TopologyFormatError(
+            f"Unknown node type '{value}'. Valid types: {valid} (MEMORY aliases to HBM_MEMORY)."
+        ) from exc
 
 
 def _validate_interconnect(value: str) -> str:
@@ -146,9 +170,9 @@ def parse_topology_document(data: dict[str, Any]) -> TopologyDocument:
         raise TopologyFormatError("Topology document must be a mapping.")
 
     version = int(data.get("schema_version", 1))
-    if version != SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise TopologyFormatError(
-            f"Unsupported schema_version {version}. Expected {SCHEMA_VERSION}."
+            f"Unsupported schema_version {version}. Supported: {sorted(SUPPORTED_SCHEMA_VERSIONS)}."
         )
 
     meta = data.get("topology", {})
@@ -158,6 +182,8 @@ def parse_topology_document(data: dict[str, Any]) -> TopologyDocument:
     defaults = data.get("defaults", {}) or {}
     default_pcie = _merge_pcie(DEFAULT_PCIE, defaults.get("pcie"))
     default_dma = {**DEFAULT_DMA, **(defaults.get("dma") or {})}
+    default_nvlink = {**DEFAULT_NVLINK, **(defaults.get("nvlink") or {})}
+    default_infiniband = {**DEFAULT_INFINIBAND, **(defaults.get("infiniband") or {})}
 
     nodes_raw = data.get("nodes")
     links_raw = data.get("links")
@@ -183,12 +209,23 @@ def parse_topology_document(data: dict[str, Any]) -> TopologyDocument:
         node_type = _validate_node_type(str(raw.get("type", "")))
         position = _parse_position(raw.get("position"))
         metadata = dict(raw.get("metadata") or {})
+        config_data = raw.get("config")
+        attach_node_config, default_node_config_dict = _registry()
+        if config_data is None and version == 1:
+            config_dict = default_node_config_dict(node_type)
+            config_dict.update(metadata)
+        else:
+            base = default_node_config_dict(node_type)
+            if isinstance(config_data, dict):
+                base.update(config_data)
+            config_dict = attach_node_config(node_type, base)
         nodes.append({
             "id": node_id,
             "name": str(name),
             "type": node_type,
             "position": position,
             "metadata": metadata,
+            "config": config_dict,
         })
 
     links: list[dict[str, Any]] = []
@@ -211,7 +248,7 @@ def parse_topology_document(data: dict[str, Any]) -> TopologyDocument:
             )
 
         interconnect = _validate_interconnect(str(raw.get("interconnect", "PCIe")))
-        links.append({
+        link_entry: dict[str, Any] = {
             "id": link_id,
             "source": source,
             "dest": dest,
@@ -221,12 +258,20 @@ def parse_topology_document(data: dict[str, Any]) -> TopologyDocument:
             "serialization_enabled": bool(raw.get("serialization_enabled", True)),
             "congestion_factor": float(raw.get("congestion_factor", 1.0)),
             "metadata": dict(raw.get("metadata") or {}),
-            "pcie": _merge_pcie(default_pcie, raw.get("pcie")) if interconnect == InterconnectType.PCIE.value else None,
-            "bandwidth_GBps": raw.get("bandwidth_GBps"),
-            "latency_us": raw.get("latency_us"),
-            "width": raw.get("width"),
-            "generation": raw.get("generation"),
-        })
+        }
+        if interconnect == InterconnectType.PCIE.value:
+            link_entry["pcie"] = _merge_pcie(default_pcie, raw.get("pcie"))
+        elif interconnect == InterconnectType.NVLINK.value:
+            merged = dict(default_nvlink)
+            if isinstance(raw.get("nvlink"), dict):
+                merged.update(raw["nvlink"])
+            link_entry["nvlink"] = merged
+        elif interconnect == InterconnectType.INFINIBAND.value:
+            merged = dict(default_infiniband)
+            if isinstance(raw.get("infiniband"), dict):
+                merged.update(raw["infiniband"])
+            link_entry["infiniband"] = merged
+        links.append(link_entry)
 
     return TopologyDocument(
         schema_version=version,
@@ -234,6 +279,8 @@ def parse_topology_document(data: dict[str, Any]) -> TopologyDocument:
         description=str(meta.get("description", "")),
         default_pcie=default_pcie,
         default_dma=default_dma,
+        default_nvlink=default_nvlink,
+        default_infiniband=default_infiniband,
         nodes=nodes,
         links=links,
     )
@@ -241,21 +288,28 @@ def parse_topology_document(data: dict[str, Any]) -> TopologyDocument:
 
 def document_to_bundle(doc: TopologyDocument) -> dict[str, Any]:
     """Convert a validated document into the internal session bundle format."""
+    _, default_node_config_dict = _registry()
     topology = Topology()
     positions: dict[str, tuple[float, float]] = {}
+    node_configs: dict[str, dict[str, Any]] = {}
 
     for node_data in doc.nodes:
+        config = dict(node_data.get("config") or default_node_config_dict(node_data["type"]))
         topology.add_node(
             Node(
                 id=node_data["id"],
                 type=NodeType(node_data["type"]),
                 name=node_data["name"],
                 metadata=node_data["metadata"],
-            )
+            ),
+            config=config,
         )
+        node_configs[node_data["id"]] = config
         positions[node_data["id"]] = node_data["position"]
 
     pcie_configs: dict[str, dict[str, Any]] = {}
+    nvlink_configs: dict[str, dict[str, Any]] = {}
+    infiniband_configs: dict[str, dict[str, Any]] = {}
 
     for link in doc.links:
         interconnect = InterconnectType(link["interconnect"])
@@ -271,45 +325,42 @@ def document_to_bundle(doc: TopologyDocument) -> dict[str, Any]:
             pcie_configs[link["id"]] = pcie_config_to_dict(pcie)
             if link["bidirectional"]:
                 pcie_configs[f"{link['id']}_rev"] = pcie_config_to_dict(pcie)
-            for edge_id in [link["id"], f"{link['id']}_rev"] if link["bidirectional"] else [link["id"]]:
-                edge = topology.edges.get(edge_id)
-                if edge is None:
-                    continue
-                edge.enabled = link["enabled"]
-                edge.serialization_enabled = link["serialization_enabled"]
-                edge.congestion_factor = link["congestion_factor"]
-                edge.metadata = dict(link["metadata"])
-        else:
-            pcie = pcie_config_from_dict(doc.default_pcie)
-            bandwidth = link.get("bandwidth_GBps")
-            if bandwidth is None:
-                bandwidth = compute_effective_bandwidth_gbps(pcie)
-            latency = link.get("latency_us")
-            if latency is None:
-                latency = float(doc.default_pcie["base_latency_us"])
-
-            edge = Edge(
-                id=link["id"],
-                source_id=link["source"],
-                dest_id=link["dest"],
-                interconnect_type=interconnect,
-                bandwidth_GBps=float(bandwidth),
-                latency_us=float(latency),
-                width=str(link.get("width") or "—"),
-                generation=str(link.get("generation") or "—"),
-                serialization_enabled=link["serialization_enabled"],
-                congestion_factor=link["congestion_factor"],
-                enabled=link["enabled"],
-                metadata=dict(link["metadata"]),
+        elif interconnect == InterconnectType.NVLINK:
+            nvlink = nvlink_config_from_dict(link["nvlink"])
+            topology.connect_nvlink(
+                link["id"],
+                link["source"],
+                link["dest"],
+                nvlink,
+                bidirectional=link["bidirectional"],
             )
-            topology.add_edge(edge)
+            nvlink_configs[link["id"]] = nvlink_config_to_dict(nvlink)
             if link["bidirectional"]:
-                rev = edge.reverse(f"{link['id']}_rev")
-                rev.enabled = link["enabled"]
-                rev.serialization_enabled = link["serialization_enabled"]
-                rev.congestion_factor = link["congestion_factor"]
-                rev.metadata = dict(link["metadata"])
-                topology.add_edge(rev)
+                nvlink_configs[f"{link['id']}_rev"] = nvlink_config_to_dict(nvlink)
+        elif interconnect == InterconnectType.INFINIBAND:
+            ib = infiniband_config_from_dict(link["infiniband"])
+            topology.connect_infiniband(
+                link["id"],
+                link["source"],
+                link["dest"],
+                ib,
+                bidirectional=link["bidirectional"],
+            )
+            infiniband_configs[link["id"]] = infiniband_config_to_dict(ib)
+            if link["bidirectional"]:
+                infiniband_configs[f"{link['id']}_rev"] = infiniband_config_to_dict(ib)
+
+        edge_ids = [link["id"]]
+        if link["bidirectional"]:
+            edge_ids.append(f"{link['id']}_rev")
+        for edge_id in edge_ids:
+            edge = topology.edges.get(edge_id)
+            if edge is None:
+                continue
+            edge.enabled = link["enabled"]
+            edge.serialization_enabled = link["serialization_enabled"]
+            edge.congestion_factor = link["congestion_factor"]
+            edge.metadata = dict(link["metadata"])
 
     return {
         "schema_version": doc.schema_version,
@@ -342,27 +393,44 @@ def document_to_bundle(doc: TopologyDocument) -> dict[str, Any]:
             for e in topology.edges.values()
         ],
         "pcie_configs": pcie_configs,
+        "nvlink_configs": nvlink_configs,
+        "infiniband_configs": infiniband_configs,
+        "node_configs": node_configs,
         "positions": {node_id: list(pos) for node_id, pos in positions.items()},
         "default_pcie": doc.default_pcie,
         "default_dma": doc.default_dma,
+        "default_nvlink": doc.default_nvlink,
+        "default_infiniband": doc.default_infiniband,
     }
 
 
 def bundle_to_document(bundle: dict[str, Any]) -> TopologyDocument:
     """Convert an internal session bundle back to a topology document."""
+    _, default_node_config_dict = _registry()
     topology = Topology()
+    node_configs = bundle.get("node_configs", {})
     for node_data in bundle.get("nodes", []):
+        config = dict(node_configs.get(node_data["id"], default_node_config_dict(node_data["type"])))
         topology.add_node(
             Node(
                 id=node_data["id"],
                 type=NodeType(node_data["type"]),
                 name=node_data["name"],
                 metadata=dict(node_data.get("metadata", {})),
-            )
+            ),
+            config=config,
         )
     pcie_lookup = {
         edge_id: pcie_config_from_dict(cfg)
         for edge_id, cfg in bundle.get("pcie_configs", {}).items()
+    }
+    nvlink_lookup = {
+        edge_id: nvlink_config_from_dict(cfg)
+        for edge_id, cfg in bundle.get("nvlink_configs", {}).items()
+    }
+    ib_lookup = {
+        edge_id: infiniband_config_from_dict(cfg)
+        for edge_id, cfg in bundle.get("infiniband_configs", {}).items()
     }
     for edge_data in bundle.get("edges", []):
         edge = Edge(
@@ -379,7 +447,12 @@ def bundle_to_document(bundle: dict[str, Any]) -> TopologyDocument:
             enabled=bool(edge_data.get("enabled", True)),
             metadata=dict(edge_data.get("metadata", {})),
         )
-        topology.add_edge(edge, pcie_config=pcie_lookup.get(edge.id))
+        topology.add_edge(
+            edge,
+            pcie_config=pcie_lookup.get(edge.id),
+            nvlink_config=nvlink_lookup.get(edge.id),
+            infiniband_config=ib_lookup.get(edge.id),
+        )
 
     positions = {
         node_id: (float(coords[0]), float(coords[1]))
@@ -412,25 +485,31 @@ def bundle_to_document(bundle: dict[str, Any]) -> TopologyDocument:
             cfg = topology.pcie_configs.get(edge.id)
             if cfg is not None:
                 link["pcie"] = pcie_config_to_dict(cfg)
-        else:
-            link["bandwidth_GBps"] = edge.bandwidth_GBps
-            link["latency_us"] = edge.latency_us
-            if edge.width != "—":
-                link["width"] = edge.width
-            if edge.generation != "—":
-                link["generation"] = edge.generation
+        elif edge.interconnect_type == InterconnectType.NVLINK:
+            cfg = topology.nvlink_configs.get(edge.id)
+            if cfg is not None:
+                link["nvlink"] = nvlink_config_to_dict(cfg)
+        elif edge.interconnect_type == InterconnectType.INFINIBAND:
+            cfg = topology.infiniband_configs.get(edge.id)
+            if cfg is not None:
+                link["infiniband"] = infiniband_config_to_dict(cfg)
         links.append(link)
 
     nodes = []
     for node in topology.nodes.values():
         pos = positions.get(node.id, (0.0, 0.0))
-        nodes.append({
+        entry: dict[str, Any] = {
             "id": node.id,
             "name": node.name,
             "type": node.type.value,
             "position": {"x": pos[0], "y": pos[1]},
-            "metadata": dict(node.metadata) or None,
-        })
+        }
+        config = topology.node_configs.get(node.id) or node.metadata.get("config")
+        if config:
+            entry["config"] = dict(config)
+        if node.metadata:
+            entry["metadata"] = {k: v for k, v in node.metadata.items() if k != "config"} or None
+        nodes.append(entry)
 
     return TopologyDocument(
         schema_version=int(bundle.get("schema_version", SCHEMA_VERSION)),
@@ -438,6 +517,8 @@ def bundle_to_document(bundle: dict[str, Any]) -> TopologyDocument:
         description=str(bundle.get("topology_description", "")),
         default_pcie=dict(bundle.get("default_pcie", DEFAULT_PCIE)),
         default_dma=dict(bundle.get("default_dma", DEFAULT_DMA)),
+        default_nvlink=dict(bundle.get("default_nvlink", DEFAULT_NVLINK)),
+        default_infiniband=dict(bundle.get("default_infiniband", DEFAULT_INFINIBAND)),
         nodes=nodes,
         links=links,
     )
@@ -461,6 +542,8 @@ def document_to_yaml_dict(doc: TopologyDocument) -> dict[str, Any]:
             "type": node["type"],
             "position": _position_to_dict(node["position"]),
         }
+        if node.get("config"):
+            entry["config"] = node["config"]
         if node.get("metadata"):
             entry["metadata"] = node["metadata"]
         nodes_out.append(entry)
@@ -481,15 +564,10 @@ def document_to_yaml_dict(doc: TopologyDocument) -> dict[str, Any]:
             entry["metadata"] = link["metadata"]
         if link["interconnect"] == InterconnectType.PCIE.value and link.get("pcie"):
             entry["pcie"] = link["pcie"]
-        else:
-            if link.get("bandwidth_GBps") is not None:
-                entry["bandwidth_GBps"] = link["bandwidth_GBps"]
-            if link.get("latency_us") is not None:
-                entry["latency_us"] = link["latency_us"]
-            if link.get("width"):
-                entry["width"] = link["width"]
-            if link.get("generation"):
-                entry["generation"] = link["generation"]
+        elif link["interconnect"] == InterconnectType.NVLINK.value and link.get("nvlink"):
+            entry["nvlink"] = link["nvlink"]
+        elif link["interconnect"] == InterconnectType.INFINIBAND.value and link.get("infiniband"):
+            entry["infiniband"] = link["infiniband"]
         links_out.append(entry)
 
     result: dict[str, Any] = {
@@ -500,6 +578,8 @@ def document_to_yaml_dict(doc: TopologyDocument) -> dict[str, Any]:
         "defaults": {
             "pcie": doc.default_pcie,
             "dma": doc.default_dma,
+            "nvlink": doc.default_nvlink,
+            "infiniband": doc.default_infiniband,
         },
         "nodes": nodes_out,
         "links": links_out,

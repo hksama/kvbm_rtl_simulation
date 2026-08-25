@@ -59,9 +59,9 @@ class TestTopologyYAML:
         with pytest.raises(TopologyFormatError):
             parse_topology_document(data)
 
-    def test_ethernet_link(self):
+    def test_ethernet_link_rejected(self):
         text = """
-schema_version: 1
+schema_version: 2
 topology:
   name: Network test
 defaults:
@@ -90,11 +90,11 @@ defaults:
 nodes:
   - id: a
     name: A
-    type: ROUTER
+    type: PREFILL_POOL
     position: {x: 0, y: 0}
   - id: b
     name: B
-    type: NIC
+    type: DECODE_POOL
     position: {x: 100, y: 0}
 links:
   - id: a_b
@@ -105,9 +105,112 @@ links:
     bandwidth_GBps: 100.0
     latency_us: 2.0
 """
+        with pytest.raises(TopologyFormatError):
+            load_topology_yaml_text(text)
+
+    def test_infiniband_link(self):
+        text = """
+schema_version: 2
+topology:
+  name: IB test
+defaults:
+  pcie:
+    generation: Gen4
+    width: x16
+    mps: 256
+    mrrs: 512
+    base_latency_us: 0.5
+    switch_hops: 0
+    congestion_factor: 1.0
+    protocol_efficiency: 0.95
+    switch_hop_latency_us: 0.15
+    read_request_latency_us: 0.2
+    memory_service_latency_us: 0.5
+    endpoint_processing_us: 0.1
+    memory_processing_us: 0.1
+    congestion_base_penalty_us: 0.05
+  dma:
+    queue_depth: 64
+    max_outstanding_reads: 16
+    request_size: 4096
+    completion_size: 4096
+    read_latency_us: 0.1
+    write_latency_us: 0.05
+  infiniband:
+    generation: NDR
+    signaling_rate_gbps: 400.0
+    lanes: 4
+    raw_bandwidth_GBps: 50.0
+    effective_bandwidth_GBps: 47.5
+    latency_us: 2.0
+    mtu_bytes: 4096
+    rdma_enabled: true
+    protocol_efficiency: 0.95
+    congestion_factor: 1.0
+nodes:
+  - id: a
+    name: A
+    type: PREFILL_POOL
+    position: {x: 0, y: 0}
+  - id: b
+    name: B
+    type: DECODE_POOL
+    position: {x: 100, y: 0}
+links:
+  - id: a_b
+    source: a
+    dest: b
+    interconnect: InfiniBand
+    bidirectional: true
+"""
         bundle = load_topology_yaml_text(text)
-        assert bundle["edges"][0]["interconnect_type"] == "Ethernet"
-        assert bundle["edges"][0]["bandwidth_GBps"] == 100.0
+        assert bundle["edges"][0]["interconnect_type"] == "InfiniBand"
+        assert "a_b" in bundle["infiniband_configs"]
+
+    def test_memory_type_alias_loads_as_hbm(self):
+        text = """
+schema_version: 2
+topology:
+  name: Alias test
+defaults:
+  pcie:
+    generation: Gen4
+    width: x16
+    mps: 256
+    mrrs: 512
+    base_latency_us: 0.5
+    switch_hops: 0
+    congestion_factor: 1.0
+    protocol_efficiency: 0.95
+    switch_hop_latency_us: 0.15
+    read_request_latency_us: 0.2
+    memory_service_latency_us: 0.5
+    endpoint_processing_us: 0.1
+    memory_processing_us: 0.1
+    congestion_base_penalty_us: 0.05
+  dma:
+    queue_depth: 64
+    max_outstanding_reads: 16
+    request_size: 4096
+    completion_size: 4096
+    read_latency_us: 0.1
+    write_latency_us: 0.05
+nodes:
+  - id: hbm
+    name: HBM
+    type: MEMORY
+    position: {x: 0, y: 0}
+links: []
+"""
+        bundle = load_topology_yaml_text(text)
+        assert bundle["nodes"][0]["type"] == "HBM_MEMORY"
+        assert "capacity_gb" in bundle["node_configs"]["hbm"]
+
+    def test_schema_v2_node_configs_in_bundle(self):
+        bundle = load_topology_yaml(EXAMPLE_PATH)
+        assert bundle["schema_version"] == 2
+        assert bundle["node_configs"]["prefill_pool"]["worker_count"] == 4
+        assert bundle["node_configs"]["prefill_hbm"]["generation"] == "HBM3"
 
     def test_document_to_bundle_topology_name(self):
         doc = parse_topology_document(yaml.safe_load(EXAMPLE_PATH.read_text()))

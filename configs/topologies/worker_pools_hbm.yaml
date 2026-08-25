@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 topology:
   name: Worker Pools with HBM Caches
@@ -29,39 +29,81 @@ defaults:
     completion_size: 4096
     read_latency_us: 0.1
     write_latency_us: 0.05
+  nvlink:
+    version: NVLink4
+    links: 18
+    bandwidth_per_link_GBps: 50.0
+    aggregate_bandwidth_GBps: 900.0
+    latency_us: 0.5
+    bidirectional: true
+    congestion_factor: 1.0
+    protocol_efficiency: 0.95
+  infiniband:
+    generation: NDR
+    signaling_rate_gbps: 400.0
+    lanes: 4
+    raw_bandwidth_GBps: 50.0
+    effective_bandwidth_GBps: 47.5
+    latency_us: 2.0
+    mtu_bytes: 4096
+    rdma_enabled: true
+    protocol_efficiency: 0.95
+    congestion_factor: 1.0
 
 nodes:
   - id: prefill_pool
     name: Prefill Worker Pool
     type: PREFILL_POOL
     position: {x: -240, y: 120}
-    metadata:
+    config:
       worker_count: 4
-      role: prefill
+      gpu_preset: h100_sxm
+      workload_rate_rps: 1000
+      metadata_ops_rate: 16000
+      kv_blocks_owned: 65536
+      attached_hbm_node_id: prefill_hbm
 
   - id: prefill_hbm
     name: Prefill HBM Cache
-    type: MEMORY
+    type: HBM_MEMORY
     position: {x: -240, y: -40}
-    metadata:
-      memory_type: HBM
-      role: prefill_kv_cache
+    config:
+      sku: HBM3 80 GB
+      capacity_gb: 80
+      bandwidth_GBps: 3350
+      stacks: 5
+      channels: 5
+      read_latency_ns: 100
+      write_latency_ns: 100
+      generation: HBM3
+      power_w: 60
 
   - id: decode_pool
     name: Decode Worker Pool
     type: DECODE_POOL
     position: {x: 240, y: 120}
-    metadata:
+    config:
       worker_count: 4
-      role: decode
+      gpu_preset: h100_sxm
+      workload_rate_rps: 2000
+      metadata_ops_rate: 32000
+      kv_blocks_owned: 65536
+      attached_hbm_node_id: decode_hbm
 
   - id: decode_hbm
     name: Decode HBM Cache
-    type: MEMORY
+    type: HBM_MEMORY
     position: {x: 240, y: -40}
-    metadata:
-      memory_type: HBM
-      role: decode_kv_cache
+    config:
+      sku: HBM3 80 GB
+      capacity_gb: 80
+      bandwidth_GBps: 3350
+      stacks: 5
+      channels: 5
+      read_latency_ns: 100
+      write_latency_ns: 100
+      generation: HBM3
+      power_w: 60
 
 links:
   - id: prefill_pool_hbm

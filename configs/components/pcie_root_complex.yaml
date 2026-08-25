@@ -1,0 +1,24 @@
+kind: PCIE_ROOT_COMPLEX
+presets:
+  rc_gen5_x16_cpu:
+    sku: CPU-integrated Gen5 RC
+    pcie_generation: Gen5
+    total_lanes: 128
+    max_link_width: x16
+    port_count: 8
+    default_mps: 256
+    default_mrrs: 512
+    hop_latency_us: 0.2
+    supports_acs: true
+    supports_ats: true
+  rc_gen4_x16_cpu:
+    sku: CPU-integrated Gen4 RC
+    pcie_generation: Gen4
+    total_lanes: 128
+    max_link_width: x16
+    port_count: 8
+    default_mps: 256
+    default_mrrs: 512
+    hop_latency_us: 0.25
+    supports_acs: true
+    supports_ats: false

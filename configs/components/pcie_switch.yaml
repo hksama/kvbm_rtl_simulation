@@ -1,0 +1,20 @@
+kind: PCIE_SWITCH
+presets:
+  pex89048_class:
+    sku: Broadcom PEX89048 class
+    pcie_generation: Gen5
+    port_count: 48
+    total_lanes: 48
+    internal_bandwidth_GBps: 128
+    hop_latency_us: 0.15
+    non_blocking: true
+    default_mps: 256
+  pex88096_class:
+    sku: Broadcom PEX88096 class
+    pcie_generation: Gen4
+    port_count: 96
+    total_lanes: 96
+    internal_bandwidth_GBps: 128
+    hop_latency_us: 0.18
+    non_blocking: true
+    default_mps: 256

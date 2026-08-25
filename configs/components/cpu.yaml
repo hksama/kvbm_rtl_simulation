@@ -1,0 +1,30 @@
+kind: CPU
+presets:
+  epyc_9654:
+    sku: AMD EPYC 9654
+    vendor: AMD
+    cores: 96
+    threads: 192
+    base_freq_ghz: 2.4
+    boost_freq_ghz: 3.7
+    l3_cache_mb: 384
+    memory_channels: 12
+    max_dram_bandwidth_GBps: 460
+    pcie_generation: Gen5
+    pcie_lanes: 128
+    numa_nodes: 2
+    tdp_w: 360
+  xeon_8480p:
+    sku: Intel Xeon Platinum 8480+
+    vendor: Intel
+    cores: 56
+    threads: 112
+    base_freq_ghz: 2.0
+    boost_freq_ghz: 3.8
+    l3_cache_mb: 105
+    memory_channels: 8
+    max_dram_bandwidth_GBps: 307
+    pcie_generation: Gen5
+    pcie_lanes: 80
+    numa_nodes: 2
+    tdp_w: 350

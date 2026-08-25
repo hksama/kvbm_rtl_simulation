@@ -1,0 +1,36 @@
+kind: FPGA
+presets:
+  alveo_u250:
+    sku: AMD Alveo U250
+    vendor: AMD
+    family: Alveo
+    logic_cells_k: 1340
+    bram_mb: 54
+    uram_mb: 0
+    dsp_slices: 6840
+    hbm_capacity_gb: 0
+    hbm_bandwidth_GBps: 0
+    pcie_generation: Gen3
+    pcie_width: x16
+    dma_engines: 2
+    max_dma_queue_depth: 64
+    clock_freq_mhz: 300
+    pipeline_depth: 8
+    tdp_w: 225
+  alveo_u55c:
+    sku: AMD Alveo U55C
+    vendor: AMD
+    family: Alveo
+    logic_cells_k: 1300
+    bram_mb: 32
+    uram_mb: 0
+    dsp_slices: 9024
+    hbm_capacity_gb: 16
+    hbm_bandwidth_GBps: 460
+    pcie_generation: Gen4
+    pcie_width: x16
+    dma_engines: 2
+    max_dma_queue_depth: 64
+    clock_freq_mhz: 300
+    pipeline_depth: 8
+    tdp_w: 150

@@ -1,0 +1,28 @@
+kind: GPU
+presets:
+  h100_sxm:
+    sku: NVIDIA H100 SXM
+    vendor: NVIDIA
+    hbm_capacity_gb: 80
+    hbm_bandwidth_GBps: 3350
+    pcie_generation: Gen5
+    pcie_width: x16
+    nvlink_version: NVLink4
+    nvlink_links: 18
+    nvlink_bandwidth_GBps: 900
+    sm_count: 132
+    fp16_tflops: 990
+    tdp_w: 700
+  h200_sxm:
+    sku: NVIDIA H200 SXM
+    vendor: NVIDIA
+    hbm_capacity_gb: 141
+    hbm_bandwidth_GBps: 4800
+    pcie_generation: Gen5
+    pcie_width: x16
+    nvlink_version: NVLink4
+    nvlink_links: 18
+    nvlink_bandwidth_GBps: 900
+    sm_count: 132
+    fp16_tflops: 990
+    tdp_w: 700

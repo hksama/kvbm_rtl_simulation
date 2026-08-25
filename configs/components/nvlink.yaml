@@ -1,0 +1,20 @@
+kind: NVLink
+presets:
+  nvlink4_h100:
+    version: NVLink4
+    links: 18
+    bandwidth_per_link_GBps: 50
+    aggregate_bandwidth_GBps: 900
+    latency_us: 0.5
+    bidirectional: true
+    congestion_factor: 1.0
+    protocol_efficiency: 0.95
+  nvlink5_b200:
+    version: NVLink5
+    links: 18
+    bandwidth_per_link_GBps: 100
+    aggregate_bandwidth_GBps: 1800
+    latency_us: 0.4
+    bidirectional: true
+    congestion_factor: 1.0
+    protocol_efficiency: 0.95

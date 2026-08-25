@@ -1,0 +1,24 @@
+kind: InfiniBand
+presets:
+  ib_hdr_200g:
+    generation: HDR
+    signaling_rate_gbps: 200
+    lanes: 4
+    raw_bandwidth_GBps: 25
+    effective_bandwidth_GBps: 23.75
+    latency_us: 2.5
+    mtu_bytes: 4096
+    rdma_enabled: true
+    protocol_efficiency: 0.95
+    congestion_factor: 1.0
+  ib_ndr_400g:
+    generation: NDR
+    signaling_rate_gbps: 400
+    lanes: 4
+    raw_bandwidth_GBps: 50
+    effective_bandwidth_GBps: 47.5
+    latency_us: 2.0
+    mtu_bytes: 4096
+    rdma_enabled: true
+    protocol_efficiency: 0.95
+    congestion_factor: 1.0

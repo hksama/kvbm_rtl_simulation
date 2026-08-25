@@ -1,0 +1,22 @@
+kind: HBM_MEMORY
+presets:
+  hbm3_80gb:
+    sku: HBM3 80 GB
+    capacity_gb: 80
+    bandwidth_GBps: 3350
+    stacks: 5
+    channels: 5
+    read_latency_ns: 100
+    write_latency_ns: 100
+    generation: HBM3
+    power_w: 60
+  hbm3e_141gb:
+    sku: HBM3e 141 GB
+    capacity_gb: 141
+    bandwidth_GBps: 4800
+    stacks: 6
+    channels: 6
+    read_latency_ns: 95
+    write_latency_ns: 95
+    generation: HBM3e
+    power_w: 70

@@ -1,0 +1,16 @@
+kind: DECODE_POOL
+presets:
+  decode_small_4xh100:
+    worker_count: 4
+    gpu_preset: h100_sxm
+    workload_rate_rps: 2000
+    metadata_ops_rate: 8000
+    kv_blocks_owned: 65536
+    attached_hbm_node_id: ""
+  decode_medium_16xh100:
+    worker_count: 16
+    gpu_preset: h100_sxm
+    workload_rate_rps: 8000
+    metadata_ops_rate: 32000
+    kv_blocks_owned: 262144
+    attached_hbm_node_id: ""

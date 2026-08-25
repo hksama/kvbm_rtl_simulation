@@ -1,0 +1,16 @@
+kind: PREFILL_POOL
+presets:
+  prefill_small_4xh100:
+    worker_count: 4
+    gpu_preset: h100_sxm
+    workload_rate_rps: 1000
+    metadata_ops_rate: 16000
+    kv_blocks_owned: 65536
+    attached_hbm_node_id: ""
+  prefill_medium_16xh100:
+    worker_count: 16
+    gpu_preset: h100_sxm
+    workload_rate_rps: 4000
+    metadata_ops_rate: 64000
+    kv_blocks_owned: 262144
+    attached_hbm_node_id: ""

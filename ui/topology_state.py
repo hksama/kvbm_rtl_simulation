@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
 
-from model.interconnect.pcie import PCIeConfig, PCIeGeneration, PCIeMPS, PCIeMRRS, PCIeWidth
+from model.interconnect.pcie import PCIeConfig
 from model.topology import Edge, InterconnectType, Node, NodeType, Topology
+from model.topology.io import (
+    DEFAULT_DMA,
+    DEFAULT_PCIE,
+    dump_topology_yaml_text,
+    load_topology_yaml,
+    load_topology_yaml_text,
+    pcie_config_from_dict,
+    pcie_config_to_dict,
+)
 from model.topology.presets import (
     ARCHITECTURE_PRESETS,
     build_preset,
@@ -19,71 +29,11 @@ DMA_SESSION_KEY = "kvbm_dma_engine"
 
 
 def _default_pcie_dict() -> dict[str, Any]:
-    return {
-        "generation": PCIeGeneration.GEN4.value,
-        "width": PCIeWidth.X16.value,
-        "mps": PCIeMPS.B256.value,
-        "mrrs": PCIeMRRS.B512.value,
-        "base_latency_us": 0.5,
-        "switch_hops": 0,
-        "congestion_factor": 1.0,
-        "protocol_efficiency": 0.95,
-        "switch_hop_latency_us": 0.15,
-        "read_request_latency_us": 0.2,
-        "memory_service_latency_us": 0.5,
-        "endpoint_processing_us": 0.1,
-        "memory_processing_us": 0.1,
-        "congestion_base_penalty_us": 0.05,
-    }
+    return dict(DEFAULT_PCIE)
 
 
 def _default_dma_dict() -> dict[str, Any]:
-    return {
-        "queue_depth": 64,
-        "max_outstanding_reads": 16,
-        "request_size": 4096,
-        "completion_size": 4096,
-        "read_latency_us": 0.1,
-        "write_latency_us": 0.05,
-    }
-
-
-def pcie_config_from_dict(data: dict[str, Any]) -> PCIeConfig:
-    return PCIeConfig(
-        generation=PCIeGeneration(data["generation"]),
-        width=PCIeWidth(data["width"]),
-        mps=PCIeMPS(int(data["mps"])),
-        mrrs=PCIeMRRS(int(data["mrrs"])),
-        base_latency_us=float(data["base_latency_us"]),
-        switch_hops=int(data["switch_hops"]),
-        congestion_factor=float(data["congestion_factor"]),
-        protocol_efficiency=float(data["protocol_efficiency"]),
-        switch_hop_latency_us=float(data["switch_hop_latency_us"]),
-        read_request_latency_us=float(data["read_request_latency_us"]),
-        memory_service_latency_us=float(data["memory_service_latency_us"]),
-        endpoint_processing_us=float(data["endpoint_processing_us"]),
-        memory_processing_us=float(data["memory_processing_us"]),
-        congestion_base_penalty_us=float(data["congestion_base_penalty_us"]),
-    )
-
-
-def pcie_config_to_dict(config: PCIeConfig) -> dict[str, Any]:
-    return {
-        "generation": config.generation.value,
-        "width": config.width.value,
-        "mps": config.mps.value,
-        "mrrs": config.mrrs.value,
-        "base_latency_us": config.base_latency_us,
-        "switch_hops": config.switch_hops,
-        "congestion_factor": config.congestion_factor,
-        "protocol_efficiency": config.protocol_efficiency,
-        "switch_hop_latency_us": config.switch_hop_latency_us,
-        "read_request_latency_us": config.read_request_latency_us,
-        "memory_service_latency_us": config.memory_service_latency_us,
-        "endpoint_processing_us": config.endpoint_processing_us,
-        "memory_processing_us": config.memory_processing_us,
-        "congestion_base_penalty_us": config.congestion_base_penalty_us,
-    }
+    return dict(DEFAULT_DMA)
 
 
 def _node_to_dict(node: Node) -> dict[str, Any]:
@@ -226,6 +176,21 @@ def set_default_dma_dict(data: dict[str, Any]) -> None:
 def load_preset(name: str) -> None:
     topology, positions = build_preset(name, pcie_config_from_dict(get_default_pcie_dict()))
     save_bundle(topology_to_bundle(topology, positions, get_default_pcie_dict(), get_default_dma_dict()))
+
+
+def load_topology_from_text(yaml_text: str) -> None:
+    """Replace the current session topology from YAML text."""
+    save_bundle(load_topology_yaml_text(yaml_text))
+
+
+def load_topology_from_file(path: str | Path) -> None:
+    """Replace the current session topology from a YAML file path."""
+    save_bundle(load_topology_yaml(path))
+
+
+def export_topology_yaml_text() -> str:
+    """Serialize the current session topology to YAML text."""
+    return dump_topology_yaml_text(get_bundle())
 
 
 def sync_topology(topology: Topology, positions: dict[str, tuple[float, float]]) -> None:

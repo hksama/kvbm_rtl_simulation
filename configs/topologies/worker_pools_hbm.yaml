@@ -1,0 +1,83 @@
+schema_version: 1
+
+topology:
+  name: Worker Pools with HBM Caches
+  description: >
+    Prefill and decode worker pools each connected to a dedicated HBM cache
+    over PCIe. No internal NVLink/NVSwitch modeling inside the pools.
+
+defaults:
+  pcie:
+    generation: Gen4
+    width: x16
+    mps: 256
+    mrrs: 512
+    base_latency_us: 0.5
+    switch_hops: 0
+    congestion_factor: 1.0
+    protocol_efficiency: 0.95
+    switch_hop_latency_us: 0.15
+    read_request_latency_us: 0.2
+    memory_service_latency_us: 0.5
+    endpoint_processing_us: 0.1
+    memory_processing_us: 0.1
+    congestion_base_penalty_us: 0.05
+  dma:
+    queue_depth: 64
+    max_outstanding_reads: 16
+    request_size: 4096
+    completion_size: 4096
+    read_latency_us: 0.1
+    write_latency_us: 0.05
+
+nodes:
+  - id: prefill_pool
+    name: Prefill Worker Pool
+    type: PREFILL_POOL
+    position: {x: -240, y: 120}
+    metadata:
+      worker_count: 4
+      role: prefill
+
+  - id: prefill_hbm
+    name: Prefill HBM Cache
+    type: MEMORY
+    position: {x: -240, y: -40}
+    metadata:
+      memory_type: HBM
+      role: prefill_kv_cache
+
+  - id: decode_pool
+    name: Decode Worker Pool
+    type: DECODE_POOL
+    position: {x: 240, y: 120}
+    metadata:
+      worker_count: 4
+      role: decode
+
+  - id: decode_hbm
+    name: Decode HBM Cache
+    type: MEMORY
+    position: {x: 240, y: -40}
+    metadata:
+      memory_type: HBM
+      role: decode_kv_cache
+
+links:
+  - id: prefill_pool_hbm
+    source: prefill_pool
+    dest: prefill_hbm
+    interconnect: PCIe
+    bidirectional: true
+    enabled: true
+    serialization_enabled: true
+    congestion_factor: 1.0
+
+  - id: decode_pool_hbm
+    source: decode_pool
+    dest: decode_hbm
+    interconnect: PCIe
+    bidirectional: true
+    enabled: true
+    serialization_enabled: true
+    congestion_factor: 1.0

@@ -35,6 +35,7 @@ from model.interconnect.pcie import (
 from model.topology import Edge, InterconnectType, Node, NodeType, Topology
 from ui.topology_state import (
     ARCHITECTURE_PRESETS,
+    export_topology_yaml_text,
     get_bundle,
     get_default_dma_dict,
     get_default_pcie_dict,
@@ -42,11 +43,13 @@ from ui.topology_state import (
     get_topology,
     init_topology_session,
     load_preset,
+    load_topology_from_text,
     pcie_config_from_dict,
     set_default_dma_dict,
     set_default_pcie_dict,
     sync_topology,
 )
+from model.topology.io import TopologyFormatError
 
 
 NODE_TYPE_OPTIONS = {t.value: t for t in NodeType}
@@ -350,6 +353,48 @@ def render_topology_designer_tab() -> None:
         if st.button("Reset to Architecture A"):
             load_preset("Architecture A — CPU ↔ FPGA (direct PCIe)")
             st.rerun()
+
+    with st.expander("Topology YAML — load / export", expanded=False):
+        st.caption(
+            "Declarative format (`schema_version: 1`) covering nodes, links, interconnect types, "
+            "PCIe config, layout positions, and default PCIe/DMA settings."
+        )
+        example_path = _ROOT / "configs" / "topologies" / "worker_pools_hbm.yaml"
+        if example_path.exists():
+            st.markdown(f"Example file: `{example_path.relative_to(_ROOT)}`")
+
+        if st.button("Fill editor with example YAML", key="fill_topology_yaml_example"):
+            if example_path.exists():
+                st.session_state["topology_yaml_input"] = example_path.read_text(encoding="utf-8")
+                st.rerun()
+            else:
+                st.error(f"Example file not found: {example_path}")
+
+        yaml_input = st.text_area(
+            "Paste topology YAML",
+            height=220,
+            placeholder="schema_version: 1\ntopology:\n  name: My Topology\n...",
+            key="topology_yaml_input",
+        )
+        ycol1, ycol2 = st.columns(2)
+        with ycol1:
+            if st.button("Load YAML into simulator"):
+                try:
+                    load_topology_from_text(yaml_input)
+                    st.success("Topology loaded.")
+                    st.rerun()
+                except TopologyFormatError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Failed to parse YAML: {exc}")
+        with ycol2:
+            exported = export_topology_yaml_text()
+            st.download_button(
+                "Download current topology YAML",
+                data=exported,
+                file_name="topology.yaml",
+                mime="text/yaml",
+            )
 
     graph_col, control_col = st.columns([1.4, 1])
 

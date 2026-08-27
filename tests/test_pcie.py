@@ -48,8 +48,15 @@ class TestPCIeBandwidth:
     def test_gen6_flit_overhead_reduces_protocol_bandwidth(self):
         raw = raw_bandwidth_gbps(16, "Gen6")
         protocol = protocol_bandwidth_gbps(16, "Gen6")
-        assert protocol < raw
+        assert raw == pytest.approx(256.0)
+        assert protocol == pytest.approx(raw * (236 / 256))
         assert protocol == pytest.approx(raw * GENERATION_TABLE["Gen6"].encoding_efficiency)
+
+    def test_gen6_x16_raw_line_rate(self):
+        """PCI-SIG headline: 64 GT/s x16 PAM4 => 256 GB/s raw per direction."""
+        assert raw_bandwidth_gbps(16, "Gen6") == pytest.approx(256.0)
+        assert raw_bandwidth_gbps(8, "Gen6") == pytest.approx(128.0)
+        assert raw_bandwidth_gbps(4, "Gen6") == pytest.approx(64.0)
 
     def test_effective_matches_breakdown(self):
         config = PCIeConfig(generation=PCIeGeneration.GEN4, width=PCIeWidth.X8)
@@ -95,3 +102,13 @@ class TestPCIeLatency:
         config = PCIeConfig(generation=PCIeGeneration.GEN4, width=PCIeWidth.X16)
         result = compute_transfer_time_us(config, 0)
         assert result.serialization_time_us == 0.0
+
+    def test_gen6_uses_flit_serialization_model(self):
+        config = PCIeConfig(generation=PCIeGeneration.GEN6, width=PCIeWidth.X16)
+        result = compute_transfer_time_us(config, 4096)
+        assert result.flit_count >= 1
+        assert result.flit_time_us > 0
+        assert result.fec_latency_us == pytest.approx(config.fec_tx_latency_us + config.fec_rx_latency_us)
+        assert result.accumulation_latency_us == pytest.approx(
+            config.flit_accumulation_fraction * result.flit_time_us
+        )

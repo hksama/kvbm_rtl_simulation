@@ -71,9 +71,9 @@ GENERATION_TABLE: dict[str, GenerationSpec] = {
     ),
 }
 
-# Gen6: 64 GT/s PAM4 (2 bits/symbol), 256-byte FLIT with overhead (ASSUMPTION).
+# Gen6: 64 GT/s PAM4 (2 bits/symbol), 256-byte FLIT, 236-byte payload (pcie_impl.md).
 GEN6_FLIT_SIZE_BYTES = 256
-GEN6_USABLE_PAYLOAD_BYTES = 220
+GEN6_USABLE_PAYLOAD_BYTES = 236
 GEN6_FLIT_EFFICIENCY = GEN6_USABLE_PAYLOAD_BYTES / GEN6_FLIT_SIZE_BYTES
 
 GENERATION_TABLE["Gen6"] = GenerationSpec(

@@ -1255,14 +1255,16 @@ def render_dma_tlp_flit_tab() -> None:
     st.dataframe(tlp_df, use_container_width=True, hide_index=True)
 
     if pcie.generation == PCIeGeneration.GEN6:
-        st.markdown("#### Gen6 FLIT packing")
+        st.markdown("#### Gen6 FLIT packing (256 B FLIT, 236 B payload / 6 B DLP / 8 B CRC / 6 B FEC)")
         flit_info = flit_summary(dma_result.tlp_on_wire_bytes)
         flit_df = pd.DataFrame([
             {"Field": "FLIT size (B)", "Value": flit_info["flit_size_bytes"]},
+            {"Field": "Payload area (B)", "Value": flit_info["flit_payload_area_bytes"]},
+            {"Field": "DLP / CRC / FEC (B)", "Value": f"{flit_info['dlp_bytes']} / {flit_info['crc_bytes']} / {flit_info['fec_bytes']}"},
+            {"Field": "η_flit (payload/FLIT)", "Value": f"{flit_info['eta_flit']:.4f}"},
             {"Field": "FLIT count", "Value": flit_info["flit_count"]},
             {"Field": "FLIT on-wire bytes", "Value": flit_info["flit_on_wire_bytes"]},
             {"Field": "FLIT overhead (B)", "Value": flit_info["flit_overhead_bytes"]},
-            {"Field": "FLIT efficiency", "Value": f"{flit_info['efficiency']:.3f}"},
         ])
         st.dataframe(flit_df, use_container_width=True, hide_index=True)
     else:

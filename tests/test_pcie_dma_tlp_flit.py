@@ -14,7 +14,17 @@ from model.interconnect.pcie import (
     fragment_transfer,
     tlp_summary,
 )
-from model.interconnect.pcie.flit import FLIT_SIZE_BYTES, apply_flit_overhead, flit_summary
+from model.interconnect.pcie.flit import (
+    FLIT_CRC_BYTES,
+    FLIT_DLP_BYTES,
+    FLIT_FEC_BYTES,
+    FLIT_SIZE_BYTES,
+    FLIT_TLP_PAYLOAD_AREA_BYTES,
+    GEN6_FLIT_EFFICIENCY,
+    apply_flit_overhead,
+    flit_count_for_bytes,
+    flit_summary,
+)
 from model.topology.presets import (
     ARCHITECTURE_PRESETS,
     build_preset,
@@ -41,6 +51,15 @@ class TestTLP:
 
 
 class TestFLIT:
+    def test_gen6_flit_layout_constants(self):
+        assert FLIT_SIZE_BYTES == 256
+        assert FLIT_TLP_PAYLOAD_AREA_BYTES == 236
+        assert FLIT_DLP_BYTES == 6
+        assert FLIT_CRC_BYTES == 8
+        assert FLIT_FEC_BYTES == 6
+        assert FLIT_TLP_PAYLOAD_AREA_BYTES + FLIT_DLP_BYTES + FLIT_CRC_BYTES + FLIT_FEC_BYTES == 256
+        assert GEN6_FLIT_EFFICIENCY == pytest.approx(236 / 256)
+
     def test_gen6_applies_flit_overhead(self):
         config = PCIeConfig(generation=PCIeGeneration.GEN6, width=PCIeWidth.X16)
         tlp_bytes = compute_transfer_on_wire_bytes(config, 4096, is_read=False)
@@ -49,6 +68,12 @@ class TestFLIT:
         summary = flit_summary(tlp_bytes)
         assert summary["flit_count"] >= 1
         assert summary["flit_size_bytes"] == FLIT_SIZE_BYTES
+        assert summary["eta_flit"] == pytest.approx(236 / 256)
+
+    def test_512_byte_tlp_spans_multiple_flits(self):
+        assert flit_count_for_bytes(512) == 3
+        assert flit_count_for_bytes(236) == 1
+        assert flit_count_for_bytes(237) == 2
 
     def test_non_gen6_skips_flit(self):
         assert apply_flit_overhead(5000, PCIeGeneration.GEN4) == 5000

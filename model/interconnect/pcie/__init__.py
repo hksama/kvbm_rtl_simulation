@@ -15,9 +15,14 @@ from model.interconnect.pcie.config import (
 )
 from model.interconnect.pcie.dma import DMAEngine, DMAOperation, DMATransferResult, compute_dma_transfer
 from model.interconnect.pcie.flit import (
+    FLIT_CRC_BYTES,
+    FLIT_DLP_BYTES,
+    FLIT_FEC_BYTES,
     FLIT_SIZE_BYTES,
     FLIT_TLP_PAYLOAD_AREA_BYTES,
+    GEN6_FLIT_EFFICIENCY,
     apply_flit_overhead,
+    flit_count_for_bytes,
     flit_on_wire_bytes,
     flit_summary,
     pack_bytes_into_flits,
@@ -43,8 +48,12 @@ __all__ = [
     "DMAEngine",
     "DMAOperation",
     "DMATransferResult",
+    "FLIT_CRC_BYTES",
+    "FLIT_DLP_BYTES",
+    "FLIT_FEC_BYTES",
     "FLIT_SIZE_BYTES",
     "FLIT_TLP_PAYLOAD_AREA_BYTES",
+    "GEN6_FLIT_EFFICIENCY",
     "PCIeConfig",
     "PCIeGeneration",
     "PCIeLatencyResult",

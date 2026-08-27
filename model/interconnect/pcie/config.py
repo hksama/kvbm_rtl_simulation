@@ -59,6 +59,12 @@ class PCIeConfig:
     endpoint_processing_us: float = 0.1
     memory_processing_us: float = 0.1
     congestion_base_penalty_us: float = 0.05
+    # Gen6 FLIT-mode PHY timing (ASSUMPTION — inject measured values when available)
+    flit_bytes: int = 256
+    flit_payload_bytes: int = 236
+    fec_tx_latency_us: float = 0.01
+    fec_rx_latency_us: float = 0.01
+    flit_accumulation_fraction: float = 0.5
 
     def lane_count(self) -> int:
         return int(self.width.value.removeprefix("x"))

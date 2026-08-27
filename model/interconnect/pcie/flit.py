@@ -1,4 +1,11 @@
-"""Lightweight PCIe Gen6 FLIT abstraction (Part 9)."""
+"""Lightweight PCIe Gen6 FLIT abstraction (Part 9).
+
+256-byte FLIT layout (PCIe 6.0 / pcie_impl.md):
+
+    |<-------- 236 B TLP/DLP payload -------->|<- DLP ->|<-- CRC -->|<- FEC ->|
+    |              usable payload              |  6 B    |   8 B     |  6 B     |
+    |<---------------------- 256 B total FLIT ------------------------------->|
+"""
 
 from __future__ import annotations
 
@@ -8,10 +15,11 @@ from dataclasses import dataclass
 from model.interconnect.pcie.config import PCIeGeneration
 
 FLIT_SIZE_BYTES = 256
-FLIT_TLP_PAYLOAD_AREA_BYTES = 220
-FLIT_DL_INFO_BYTES = 8
-FLIT_CRC_BYTES = 4
-FLIT_FEC_BYTES = 24
+FLIT_TLP_PAYLOAD_AREA_BYTES = 236
+FLIT_DLP_BYTES = 6
+FLIT_CRC_BYTES = 8
+FLIT_FEC_BYTES = 6
+GEN6_FLIT_EFFICIENCY = FLIT_TLP_PAYLOAD_AREA_BYTES / FLIT_SIZE_BYTES
 
 
 @dataclass
@@ -20,13 +28,13 @@ class FLIT:
 
     index: int
     tlp_payload_bytes: int
-    dl_info_bytes: int = FLIT_DL_INFO_BYTES
+    dlp_bytes: int = FLIT_DLP_BYTES
     crc_bytes: int = FLIT_CRC_BYTES
     fec_bytes: int = FLIT_FEC_BYTES
 
     @property
     def overhead_bytes(self) -> int:
-        return self.dl_info_bytes + self.crc_bytes + self.fec_bytes
+        return self.dlp_bytes + self.crc_bytes + self.fec_bytes
 
     @property
     def total_bytes(self) -> int:
@@ -37,12 +45,19 @@ class FLIT:
         return self.tlp_payload_bytes / FLIT_SIZE_BYTES if FLIT_SIZE_BYTES else 0.0
 
 
+def flit_count_for_bytes(on_wire_bytes: int, payload_area_bytes: int = FLIT_TLP_PAYLOAD_AREA_BYTES) -> int:
+    """Number of FLITs required to carry ``on_wire_bytes`` of TLP/DLP data."""
+    if on_wire_bytes <= 0:
+        return 0
+    return math.ceil(on_wire_bytes / payload_area_bytes)
+
+
 def pack_bytes_into_flits(on_wire_bytes: int) -> list[FLIT]:
     """
     Pack serialized TLP byte stream into 256 B FLITs.
 
-    TLP payload area per FLIT is capped at FLIT_TLP_PAYLOAD_AREA_BYTES;
-    a large TLP may span multiple FLITs.
+    Each FLIT carries up to 236 B in the TLP/DLP payload region; a large TLP
+    may span multiple FLITs (one TLP != one FLIT).
     """
     if on_wire_bytes <= 0:
         return []
@@ -60,10 +75,7 @@ def pack_bytes_into_flits(on_wire_bytes: int) -> list[FLIT]:
 
 def flit_on_wire_bytes(on_wire_bytes: int) -> int:
     """Total bytes transmitted after Gen6 FLIT encapsulation."""
-    if on_wire_bytes <= 0:
-        return 0
-    flit_count = math.ceil(on_wire_bytes / FLIT_TLP_PAYLOAD_AREA_BYTES)
-    return flit_count * FLIT_SIZE_BYTES
+    return flit_count_for_bytes(on_wire_bytes) * FLIT_SIZE_BYTES
 
 
 def apply_flit_overhead(on_wire_bytes: int, generation: PCIeGeneration | str) -> int:
@@ -81,6 +93,11 @@ def flit_summary(on_wire_bytes: int) -> dict[str, int | float]:
     return {
         "flit_count": len(flits),
         "flit_size_bytes": FLIT_SIZE_BYTES,
+        "flit_payload_area_bytes": FLIT_TLP_PAYLOAD_AREA_BYTES,
+        "dlp_bytes": FLIT_DLP_BYTES,
+        "crc_bytes": FLIT_CRC_BYTES,
+        "fec_bytes": FLIT_FEC_BYTES,
+        "eta_flit": GEN6_FLIT_EFFICIENCY,
         "tlp_on_wire_bytes": on_wire_bytes,
         "flit_on_wire_bytes": total,
         "flit_overhead_bytes": total - on_wire_bytes,
